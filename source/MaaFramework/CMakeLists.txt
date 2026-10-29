@@ -3,6 +3,9 @@ file(GLOB_RECURSE maa_common_src ../Common/*.h ../Common/*.hpp ../Common/*.cpp)
 file(GLOB_RECURSE maa_framework_header ${MAA_PUBLIC_INC}/MaaFramework/*)
 
 add_library(MaaFramework SHARED ${maa_common_src} ${maa_framework_src} ${maa_framework_header})
+if(WITH_ORT_CUDA)
+    set_property(SOURCE Resource/OCRResMgr.cpp APPEND PROPERTY COMPILE_DEFINITIONS MAA_ORT_CUDA_OCR)
+endif()
 
 target_include_directories(
     MaaFramework

@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(MaaFw)
+option(WITH_ORT_CUDA "Use ORT CUDA for OCR with CPU preprocessing" OFF)
 
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 

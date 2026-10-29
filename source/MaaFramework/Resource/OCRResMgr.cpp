@@ -40,8 +40,16 @@ void OCRResMgr::use_cuda(int device_id)
 
     use_ncnn_ = false;
 
+#ifdef MAA_ORT_CUDA_OCR
+    det_option_.device = fastdeploy::Device::CUDA;
+    det_option_.device_id = device_id;
+    rec_option_.device = fastdeploy::Device::CUDA;
+    rec_option_.device_id = device_id;
+    LogInfo << "Configured ORT CUDA OCR with CPU preprocessing" << VAR(device_id);
+#else
     det_option_.UseCuda(device_id);
     rec_option_.UseCuda(device_id);
+#endif
 }
 
 void OCRResMgr::use_directml(int device_id)
