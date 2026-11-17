@@ -3,6 +3,9 @@
 #include <filesystem>
 #include <ranges>
 
+#ifdef MAA_ORT_CUDA_OCR
+#include "CudaShapeCachedRecognizer.h"
+#endif
 #include "FastDeployOCRSession.h"
 #include "InferenceContext.h"
 #include "MaaUtils/File.hpp"
@@ -329,7 +332,12 @@ std::shared_ptr<fastdeploy::vision::ocr::Recognizer> OCRResMgr::load_recer(const
         LogDebug << VAR(model_path);
 
         const InferenceContext context(rec_option_.device != fastdeploy::Device::CPU);
-        auto rec = context.make_shared<fastdeploy::vision::ocr::Recognizer>(
+#ifdef MAA_ORT_CUDA_OCR
+        using OcrRecognizer = maa_ocr::CudaShapeCachedRecognizer;
+#else
+        using OcrRecognizer = fastdeploy::vision::ocr::Recognizer;
+#endif
+        auto rec = context.make_shared<OcrRecognizer>(
             path_to_utf8_string(model_path),
             std::string(),
             path_to_utf8_string(label_path),

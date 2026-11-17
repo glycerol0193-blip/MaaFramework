@@ -28,3 +28,15 @@ MaaResourceSetOption(resource, MaaResOption_InferenceDevice, &device, sizeof(dev
 The experiment configures `RuntimeOption.device` and `device_id` after explicitly selecting the ORT backend. It avoids the native-kernel build check in FastDeploy's `UseCuda` convenience setter; it does not add a CUDA backend implementation. Existing resource loading, failure fallback and session lifetime behavior are preserved.
 
 加载资源前使用既有 CUDA EP 枚举和数字设备序号即可；没有增加公开 API 或 Pipeline 字段。此配置保留原有加载、回退与生命周期行为，不修改后端实现。
+
+## Recognition session cache
+
+Build with `-DWITH_ORT_CUDA=ON`, select the CUDA EP as above, and set
+`MAA_OCR_SHAPE_CACHE=1` before starting the application. Unset the variable or
+set it to `0` to use the original recognition session.
+
+Each FastDeploy ORT CUDA recognizer keeps up to four recently used sessions
+keyed by input tensor shapes and data types. Detection, preprocessing, and
+batching use the existing path. Cache misses create a session and increase
+first-use latency. Additional sessions can also increase VRAM usage. The
+cache is opt-in for both Release and Debug builds.
