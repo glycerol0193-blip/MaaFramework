@@ -3,6 +3,7 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -21,7 +22,7 @@ public:
     void set_latest_node(const std::string& name, MaaNodeId id);
 
     std::optional<MAA_TASK_NS::RecoResult> get_reco_result(MaaRecoId uid) const;
-    void set_reco_detail(MaaRecoId uid, MAA_TASK_NS::RecoResult);
+    std::string set_reco_detail(MaaRecoId uid, MAA_TASK_NS::RecoResult);
 
     std::optional<MAA_TASK_NS::ActionResult> get_action_result(MaaActId uid) const;
     void set_action_detail(MaaActId uid, MAA_TASK_NS::ActionResult);
@@ -33,18 +34,22 @@ public:
     void set_node_detail(MaaNodeId uid, MAA_TASK_NS::NodeDetail detail);
 
     std::optional<MAA_TASK_NS::TaskDetail> get_task_detail(MaaTaskId uid) const;
-    void set_task_detail(MaaTaskId uid, MAA_TASK_NS::TaskDetail detail);
+    void set_task_status(MaaTaskId uid, const std::string& entry, MaaStatus status);
+    void append_task_node(MaaTaskId uid, const std::string& entry, MaaNodeId node_id);
 
-    void clear();
+    void clear(const std::set<MaaTaskId>& retained_task_ids);
 
 private:
+    friend class RuntimeCacheTest;
+
     struct RecoImageCache
     {
         MAA_TASK_NS::ImageEncodedBuffer raw;
         std::vector<MAA_TASK_NS::ImageEncodedBuffer> draws;
     };
 
-    void evict_reco_image_cache_if_needed(size_t limit);
+    void evict_reco_image_cache_if_needed(MaaSize count, MaaSize bytes);
+    static MaaSize image_bytes(const RecoImageCache& images);
 
     std::map<std::string, MaaNodeId> latest_nodes_;
     mutable std::shared_mutex latest_nodes_mutex_;
@@ -52,6 +57,7 @@ private:
     std::map<MaaRecoId, MAA_TASK_NS::RecoResult> reco_details_;
     std::unordered_map<MaaRecoId, RecoImageCache> reco_image_cache_;
     std::deque<MaaRecoId> reco_image_order_;
+    MaaSize reco_image_bytes_ = 0;
     mutable std::shared_mutex reco_details_mutex_;
 
     std::map<MaaActId, MAA_TASK_NS::ActionResult> action_details_;
@@ -64,6 +70,7 @@ private:
     mutable std::shared_mutex node_details_mutex_;
 
     std::map<MaaTaskId, MAA_TASK_NS::TaskDetail> task_details_;
+    std::set<MaaTaskId> running_task_ids_;
     mutable std::shared_mutex task_details_mutex_;
 };
 

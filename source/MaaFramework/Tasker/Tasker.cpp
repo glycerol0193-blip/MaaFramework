@@ -20,21 +20,27 @@ Tasker::Tasker()
     LogFunc;
 
     auto& plugin_mgr = MAA_GLOBAL_NS::PluginMgr::get_instance();
+    plugin_mgr.instance_created();
     LogInfo << VAR(plugin_mgr.get_names());
 
     for (const auto& sink : plugin_mgr.get_tasker_sinks()) {
-        add_sink(sink, this);
+        notifier_.add_plugin_sink(sink, this);
     }
     for (const auto& sink : plugin_mgr.get_ctx_sinks()) {
-        add_context_sink(sink, this);
+        context_notifier_.add_plugin_sink(sink, this);
     }
 
     task_runner_ = std::make_unique<AsyncRunner<TaskPtr>>(std::bind(&Tasker::run_task, this, std::placeholders::_1, std::placeholders::_2));
+    notifier_.notify_plugins(this, MaaMsg_Tasker_Created, json::object { });
 }
 
 Tasker::~Tasker()
 {
     LogFunc;
+
+    task_runner_->release();
+    notifier_.notify_plugins(this, MaaMsg_Tasker_Destroying, json::object { });
+    MAA_GLOBAL_NS::PluginMgr::get_instance().instance_destroyed();
 }
 
 bool Tasker::bind_resource(MaaResource* resource)
@@ -203,12 +209,19 @@ void Tasker::clear_cache()
 {
     LogTrace;
 
-    {
-        std::unique_lock lock(task_id_mapping_mutex_);
-        task_id_mapping_.clear();
-    }
+    // Serialize with post_task so a queued job cannot lose its initial detail.
+    std::unique_lock lock(task_id_mapping_mutex_);
+    std::set<MaaTaskId> retained_task_ids;
+    std::erase_if(task_id_mapping_, [this, &retained_task_ids](const auto& item) {
+        auto status = task_runner_->status(item.second);
+        if (status == AsyncRunner<TaskPtr>::Status::pending || status == AsyncRunner<TaskPtr>::Status::running) {
+            retained_task_ids.insert(item.first);
+            return false;
+        }
+        return true;
+    });
 
-    runtime_cache().clear();
+    runtime_cache().clear(retained_task_ids);
 }
 
 std::optional<MAA_TASK_NS::TaskDetail> Tasker::get_task_detail(MaaTaskId task_id) const
@@ -302,12 +315,9 @@ MaaTaskId Tasker::post_task(TaskPtr task_ptr, const json::value& pipeline_overri
         return MaaInvalidId;
     }
 
-    runtime_cache_.set_task_detail(
-        task_id,
-        MAA_TASK_NS::TaskDetail { .task_id = task_id, .entry = task_ptr->entry(), .status = MaaStatus_Pending });
-
     std::unique_lock lock(task_id_mapping_mutex_);
 
+    runtime_cache_.set_task_status(task_id, task_ptr->entry(), MaaStatus_Pending);
     RunnerId runner_id = task_runner_->post(task_ptr);
     task_id_mapping_.emplace(task_id, runner_id);
 
@@ -333,7 +343,7 @@ bool Tasker::run_task(RunnerId runner_id, TaskPtr task_ptr)
 
     MaaTaskId task_id = task_ptr->task_id();
     const std::string& entry = task_ptr->entry();
-    const json::value cb_detail = {
+    json::value cb_detail = {
         { "task_id", task_id },
         { "entry", entry },
         { "hash", resource_ ? resource_->get_hash() : std::string() },
@@ -342,12 +352,7 @@ bool Tasker::run_task(RunnerId runner_id, TaskPtr task_ptr)
 
     LogInfo << "task start:" << VAR(cb_detail);
 
-    {
-        // value_or 的默认值用于在 post 之后调用方手动 clear cache 了的情况
-        auto task_detail = runtime_cache_.get_task_detail(task_id).value_or(MAA_TASK_NS::TaskDetail { .task_id = task_id, .entry = entry });
-        task_detail.status = MaaStatus_Running;
-        runtime_cache_.set_task_detail(task_id, std::move(task_detail));
-    }
+    runtime_cache_.set_task_status(task_id, entry, MaaStatus_Running);
     notifier_.notify(this, MaaMsg_Tasker_Task_Starting, cb_detail);
 
     bool ret = task_ptr->run();
@@ -357,18 +362,15 @@ bool Tasker::run_task(RunnerId runner_id, TaskPtr task_ptr)
     }
 
     LogInfo << "task end:" << VAR(cb_detail) << VAR(ret);
-    {
-        // value_or 的默认值用于 run 到一半调用方手动 clear cache 了的情况
-        auto task_detail = runtime_cache_.get_task_detail(task_id).value_or(MAA_TASK_NS::TaskDetail { .task_id = task_id, .entry = entry });
-        task_detail.status = ret ? MaaStatus_Succeeded : MaaStatus_Failed;
-        runtime_cache_.set_task_detail(task_id, std::move(task_detail));
-    }
+    runtime_cache_.set_task_status(task_id, entry, ret ? MaaStatus_Succeeded : MaaStatus_Failed);
+    cb_detail["reason"] = task_ptr->termination_reason(ret);
     notifier_.notify(this, ret ? MaaMsg_Tasker_Task_Succeeded : MaaMsg_Tasker_Task_Failed, cb_detail);
 
     if (controller_ && !task_runner_->pending()) {
         controller_->wait(controller_->post_inactive());
     }
 
+    MAA_LOG_NS::Logger::get_instance().cleanup();
     return ret;
 }
 

@@ -57,6 +57,7 @@ __all__ = [
     "MaaWin32InputMethod",
     "MaaMacOSScreencapMethod",
     "MaaMacOSInputMethod",
+    "MaaIOSScreencapMethod",
     "MaaLinuxScreencapMethod",
     "MaaLinuxInputMethod",
     "MaaGamepadType",
@@ -80,6 +81,9 @@ __all__ = [
     "MaaWin32InputMethodEnum",
     "MaaMacOSScreencapMethodEnum",
     "MaaMacOSInputMethodEnum",
+    "MaaIOSScreencapMethodEnum",
+    "MaaIOSConnectionMethod",
+    "MaaIOSConnectionMethodEnum",
     "MaaLinuxScreencapMethodEnum",
     "MaaLinuxInputMethodEnum",
     "MaaGamepadTypeEnum",
@@ -233,6 +237,10 @@ class MaaGlobalOptionEnum(IntEnum):
     # value: size_t, eg: 4096; val_size: sizeof(size_t)
     # default value is 4096
     RecoImageCacheLimit = 9
+    RecoImageRaw = 10
+    RecoImageDraws = 11
+    RecoImageCacheBytes = 12
+    CaptureConfig = 13
 
 
 class MaaCtrlOptionEnum(IntEnum):
@@ -347,6 +355,10 @@ class MaaResOptionEnum(IntEnum):
     # default value is MaaInferenceExecutionProvider_Auto
     InferenceExecutionProvider = 2
 
+    # UTF-8 JSON configuration for the optional WeChatOCR engine (Windows x64).
+    # Must be set before any Resource.post_* call. Resource.clear() resets it.
+    WeChatOCR = 3
+
 
 MaaAdbScreencapMethod = ctypes.c_uint64
 
@@ -371,7 +383,7 @@ class MaaAdbScreencapMethodEnum(IntEnum):
     | RawByNetcat           | Fast       | Low           | Lossless |                                   |
     | MinicapDirect         | Fast       | Low           | Lossy    |                                   |
     | MinicapStream         | Very Fast  | Low           | Lossy    |                                   |
-    | EmulatorExtras        | Very Fast  | Low           | Lossless | Emulators only: MuMu 12, LDPlayer 9, Androws |
+    | EmulatorExtras        | Very Fast  | Low           | Lossless | Emulators only: MuMu 12, LDPlayer 9, AVD, Androws, ModAVD |
     """
 
     Null = 0
@@ -407,7 +419,7 @@ class MaaAdbInputMethodEnum(IntEnum):
     | AdbShell             | Slow  | High          |                                       |
     | MinitouchAndAdbKey   | Fast  | Medium        | Key press still uses AdbShell         |
     | Maatouch             | Fast  | Medium        |                                       |
-    | EmulatorExtras       | Fast  | Low           | Emulators only: MuMu 12               |
+    | EmulatorExtras       | Fast  | Low           | Emulators only: MuMu 12, Androws, ModAVD       |
     """
 
     Null = 0
@@ -419,6 +431,40 @@ class MaaAdbInputMethodEnum(IntEnum):
 
     All = ~Null
     Default = All & (~EmulatorExtras)
+
+
+MaaIOSConnectionMethod = ctypes.c_int32
+
+
+class MaaIOSConnectionMethodEnum(IntEnum):
+    Auto = 0
+    USB = 1
+    WiFi = 2
+
+
+MaaIOSScreencapMethod = ctypes.c_uint64
+
+
+class MaaIOSScreencapMethodEnum(IntEnum):
+    """
+    iOS screencap method flags.
+
+    Use bitwise OR to select the permitted backends. Video frames are preferred
+    when Stream is enabled; ScreenshotService provides a lossless RPC fallback.
+    Stream alone has no screenshot fallback. ScreenshotService alone starts no
+    video session or background video decoder. Stream carries lossy HEVC video.
+
+    Default: All methods. Reported availability describes supported backends,
+    not a guarantee that every connected device/DDI exposes both services.
+    """
+
+    Null = 0
+
+    Stream = 1
+    ScreenshotService = 1 << 1
+
+    All = ~Null
+    Default = All
 
 
 MaaWin32ScreencapMethod = ctypes.c_uint64
@@ -1142,8 +1188,8 @@ class RecognitionDetail:
     best_result: Optional[RecognitionResult]
 
     raw_detail: dict[str, Any]
-    raw_image: numpy.ndarray  # only valid in debug mode
-    draw_images: list[numpy.ndarray]  # only valid in debug mode
+    raw_image: numpy.ndarray  # available when enabled and retained by the image cache
+    draw_images: list[numpy.ndarray]  # available when enabled and retained by the image cache
 
 
 @dataclass

@@ -1,8 +1,14 @@
+import assert from 'node:assert/strict'
 import { join } from 'path'
+import { tmpdir } from 'node:os'
 import './maa-client.ts'
 import { expectRegistrationError } from './custom-registration.ts'
+import { runApiContractTests } from './api-contract.ts'
 
 import * as fs from 'fs/promises'
+
+const binaryDir = process.env.MAAFW_BINARY_PATH ?? '../../install/bin'
+const logDir = join(tmpdir(), `maafw-node-tests-${process.pid}`)
 
 let analyzed = false
 let runned = false
@@ -46,7 +52,15 @@ const myReco: maa.CustomRecognitionCallback = async self => {
 
     analyzed = true
 
-    return [[11, 4, 5, 14], 'Hello World!']
+    return [
+        [11, 4, 5, 14],
+        JSON.stringify({
+            $all: [
+                { box: [11, 4, 5, 14], detail: { message: 'first' } },
+                { box: [21, 24, 25, 34], detail: { message: 'second' } }
+            ]
+        })
+    ]
 }
 
 const myAct: maa.CustomActionCallback = async self => {
@@ -93,7 +107,14 @@ async function api_test() {
     r2.inference_execution_provider = 'DirectML'
     r2.inference_device = 114514
     r2.inference_execution_provider = 'CPU'
-    await r2.post_bundle('/path/to/resource').wait()
+    const failedLoad = await r2.post_bundle('/path/to/resource').wait()
+    const loadDetail = r2.get_load_detail(failedLoad.id)
+    assert.ok(loadDetail)
+    const loadId: number = loadDetail.res_id
+    assert.equal(loadId, Number(failedLoad.id))
+    assert.equal(loadDetail.status, failedLoad.status)
+    assert.equal(loadDetail.type, 'Bundle')
+    assert.ok(loadDetail.errors.length > 0)
     r2.destroy()
 
     const resource = new maa.Resource()
@@ -103,7 +124,7 @@ async function api_test() {
     console.log('rsource', resource)
 
     const dbg_controller = new maa.DbgController(
-        '../../install/test/PipelineSmoking/Screenshot'
+        join(binaryDir, '..', 'test', 'PipelineSmoking', 'Screenshot')
     )
     dbg_controller.add_sink((res, msg) => {
         console.log(msg)
@@ -165,7 +186,8 @@ async function api_test() {
             custom_recognition: 'MyRec',
             action: 'Custom',
             custom_action: 'MyAct',
-            custom_action_param: '哈哈哈(*´▽｀)ノノ'
+            custom_action_param: '哈哈哈(*´▽｀)ノノ',
+            index: -1
         }
     }
 
@@ -176,6 +198,24 @@ async function api_test() {
     }
     console.log('pipeline detail:', detail)
 
+    const rec_node_id = detail.nodes.find(id => tasker.node_detail(id)?.name === 'Rec')
+    const rec_node = rec_node_id === undefined ? null : tasker.node_detail(rec_node_id)
+    const reco_detail = rec_node?.reco ?? null
+    console.log('reco detail:', reco_detail)
+    if (!reco_detail || !reco_detail.hit) {
+        console.log('custom recognition should hit')
+        process.exit(1)
+    }
+    const multi_detail = Array.isArray(reco_detail.detail) ? null : reco_detail.detail
+    if (!multi_detail || multi_detail.all.length !== 2 || multi_detail.filtered.length !== 2) {
+        console.log('custom recognition should return 2 results')
+        process.exit(1)
+    }
+    if (JSON.stringify(multi_detail.best?.box) !== JSON.stringify([21, 24, 25, 34])) {
+        console.log('index -1 should select the second result')
+        process.exit(1)
+    }
+
     tasker.resource?.post_bundle('/path/to/resource')
     tasker.clear_cache()
     const inited = tasker.inited
@@ -183,7 +223,7 @@ async function api_test() {
 
     maa.Global.save_draw = true
     maa.Global.stdout_level = 'All'
-    maa.Global.log_dir = '.'
+    maa.Global.log_dir = logDir
 
     const devices = await maa.AdbController.find()
     console.log('devices', devices)
@@ -228,10 +268,9 @@ async function custom_ctrl_test() {
 
     console.log('controller count', myCtrl.count, 'ret', ret)
 
-    // if (!ret) {
-    //     console.log('failed to run custom controller')
-    //     process.exit(1)
-    // }
+    if (!ret) {
+        throw new Error('Custom controller operation failed')
+    }
 }
 
 async function win32_relative_move_test() {
@@ -326,7 +365,7 @@ class MyController implements maa.CustomControllerActor {
     screencap(): maa.MaybePromise<maa.ImageData | null> {
         console.log('on MyController.screencap')
         this.count += 1
-        return fs.readFile('empty.png').then(x => x.buffer)
+        return fs.readFile(new URL('./empty.png', import.meta.url)).then(data => Uint8Array.from(data).buffer)
     }
     click(x: number, y: number): maa.MaybePromise<boolean> {
         console.log('on MyController.click, x', x, 'y', y)
@@ -414,8 +453,10 @@ async function main() {
     console.log('MaaFw Version:', maa.Global.version)
     // console.log('MaaFw Role', maa.AgentRole)
 
-    maa.Global.config_init_option('../../install/bin')
+    maa.Global.config_init_option(binaryDir)
+    maa.Global.log_dir = logDir
 
+    await runApiContractTests()
     await api_test()
     await win32_relative_move_test()
     win32_interception_enum_test()

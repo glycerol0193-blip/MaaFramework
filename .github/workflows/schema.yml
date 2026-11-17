@@ -8,6 +8,9 @@ on:
         paths:
             - '.github/workflows/schema.yml'
             - 'tools/**'
+            - 'test/schema/**'
+            - 'test/python/test_schema_contract.py'
+            - 'test/requirements.txt'
 
     pull_request:
         branches:
@@ -15,6 +18,9 @@ on:
         paths:
             - '.github/workflows/schema.yml'
             - 'tools/**'
+            - 'test/schema/**'
+            - 'test/python/test_schema_contract.py'
+            - 'test/requirements.txt'
 
     workflow_dispatch:
 
@@ -24,7 +30,8 @@ concurrency:
 
 jobs:
     interface-import:
-        runs-on: ubuntu-latest
+        # 原因同 test.yml 的 ubuntu job：26.04 上 setup-python 没有 3.9 构建
+        runs-on: ubuntu-24.04
         steps:
             - name: Checkout repository
               uses: actions/checkout@v7
@@ -38,3 +45,9 @@ jobs:
 
             - name: Check importable fields
               run: python tools/check_interface_schema.py --verbose
+
+            - name: Install schema test dependencies
+              run: python -m pip install -r test/requirements.txt
+
+            - name: Run schema contract tests
+              run: python -m unittest discover -s test/python -p test_schema_contract.py -v

@@ -96,6 +96,10 @@ cv::Mat OCRer::apply_color_filter(const cv::Mat& image_roi) const
 
 OCRer::ResultsVec OCRer::predict() const
 {
+    if (param_.only_rec && session_ && !session_->supports_rec_only()) {
+        LogError << "OCR engine does not support only_rec" << VAR(param_.engine);
+        return { };
+    }
     ResultsVec results;
 
     auto image_roi = image_with_roi();
@@ -137,6 +141,11 @@ OCRer::ResultsVec OCRer::handle_cached() const
             results.emplace_back(c);
         }
         else if (cv::Rect ints = roi_ & c.box; ints.area() > 0) {
+            // 交集不到框高的一半时（框只擦到 ROI 上下边缘，或 ROI 比框还矮），交集可能只是 1px 高的细缝，
+            // rec 按高度缩放到 48px 后宽度放大数百倍，耗费数 GB 内存。这种 ROI 不用缓存，自己做一次 det+rec，结果和不开 batch 时一致。
+            if (ints.height * 2 < c.box.height) {
+                return predict();
+            }
             intersections.emplace_back(ints);
         }
     }
@@ -203,6 +212,10 @@ OCRer::ResultsVec OCRer::predict_det_and_rec(const cv::Mat& image_roi) const
 
 OCRer::Result OCRer::predict_only_rec(const cv::Mat& image_roi) const
 {
+    if (session_ && !session_->supports_rec_only()) {
+        LogError << "OCR engine does not support only_rec" << VAR(param_.engine);
+        return { };
+    }
     if (!session_) {
         LogError << "OCRSession not loaded";
         return { };
@@ -228,6 +241,11 @@ OCRer::Result OCRer::predict_only_rec(const cv::Mat& image_roi) const
 OCRer::ResultsVec OCRer::predict_batch_rec(const std::vector<cv::Rect>& rois) const
 {
     LogFunc << VAR(rois);
+
+    if (session_ && !session_->supports_rec_only()) {
+        LogError << "OCR engine does not support batch_rec" << VAR(param_.engine);
+        return { };
+    }
 
     if (!session_) {
         LogError << "OCRSession not loaded";
@@ -300,7 +318,8 @@ void OCRer::add_results(ResultsVec results, const std::vector<std::wstring>& exp
 {
     auto copied = results;
     for (auto& res : copied) {
-        if (res.score < param_.threshold) {
+        // An unknown confidence can only pass when score filtering is disabled.
+        if (res.score < 0 ? param_.threshold > 0 : res.score < param_.threshold) {
             continue;
         }
 

@@ -15,6 +15,10 @@
 #include "Tasker/Tasker.h"
 #include "Vision/OCRer.h"
 
+MAA_VISION_NS_BEGIN
+struct NeuralNetworkCache;
+MAA_VISION_NS_END
+
 MAA_TASK_NS_BEGIN
 
 class TaskBase : public NonCopyable
@@ -35,6 +39,7 @@ public:
     MaaTaskId task_id() const;
     const std::string& entry() const;
     static MaaNodeId generate_node_id();
+    std::string termination_reason(bool succeeded) const;
 
 protected:
     MAA_RES_NS::ResourceMgr* resource();
@@ -44,11 +49,11 @@ protected:
         const cv::Mat& image,
         const PipelineData& data,
         std::optional<std::string> anchor_name = std::nullopt,
-        std::shared_ptr<MAA_VISION_NS::OCRCache> ocr_cache = nullptr);
+        std::shared_ptr<MAA_VISION_NS::OCRCache> ocr_cache = nullptr,
+        std::shared_ptr<MAA_VISION_NS::NeuralNetworkCache> nn_cache = nullptr);
     ActionResult run_action(const RecoResult& reco, const PipelineData& data);
     cv::Mat screencap();
     void set_node_detail(MaaNodeId node_id, NodeDetail detail);
-    void set_task_detail(TaskDetail detail);
 
     void wait_freezes(
         const MAA_RES_NS::WaitFreezesParam& param,
@@ -69,6 +74,7 @@ protected:
     std::string cur_node_;
 
     std::shared_ptr<Context> context_ = nullptr;
+    std::string failure_reason_ = "unknown";
 
 private:
     inline static std::atomic<MaaTaskId> s_global_task_id = kTaskIdBase;

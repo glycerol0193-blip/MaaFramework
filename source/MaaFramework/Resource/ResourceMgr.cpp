@@ -40,19 +40,25 @@ ResourceMgr::ResourceMgr()
     LogFunc;
 
     auto& plugin_mgr = MAA_GLOBAL_NS::PluginMgr::get_instance();
+    plugin_mgr.instance_created();
     LogInfo << VAR(plugin_mgr.get_names());
 
     for (const auto& sink : plugin_mgr.get_res_sinks()) {
-        add_sink(sink, this);
+        notifier_.add_plugin_sink(sink, this);
     }
 
     res_loader_ =
         std::make_unique<AsyncRunner<PostPathItem>>(std::bind(&ResourceMgr::run_load, this, std::placeholders::_1, std::placeholders::_2));
+    notifier_.notify_plugins(this, MaaMsg_Resource_Created, json::object { });
 }
 
 ResourceMgr::~ResourceMgr()
 {
     LogFunc;
+
+    res_loader_->release();
+    notifier_.notify_plugins(this, MaaMsg_Resource_Destroying, json::object { });
+    MAA_GLOBAL_NS::PluginMgr::get_instance().instance_destroyed();
 }
 
 bool ResourceMgr::set_option(MaaResOption key, MaaOptionValue value, MaaOptionValueSize val_size)
@@ -66,10 +72,34 @@ bool ResourceMgr::set_option(MaaResOption key, MaaOptionValue value, MaaOptionVa
     case MaaResOption_InferenceExecutionProvider:
         return set_inference_execution_provider(value, val_size);
 
+    case MaaResOption_WeChatOCR:
+        return set_wechat_ocr(value, val_size);
+
     default:
         LogError << "Unknown key" << VAR(key) << VAR(value);
         return false;
     }
+}
+
+bool ResourceMgr::set_wechat_ocr(MaaOptionValue value, MaaOptionValueSize val_size)
+{
+    if (!value || val_size == 0 || val_size > 1024 * 1024) {
+        return false;
+    }
+    std::string config_text(static_cast<const char*>(value), static_cast<size_t>(val_size));
+    if (config_text.back() == '\0') {
+        config_text.pop_back();
+    }
+    auto config = json::parse(config_text);
+    if (!config || !config->is_object()) {
+        return false;
+    }
+    std::unique_lock lock(inference_mutex_);
+    if (inference_locked_) {
+        LogError << "Configure WeChatOCR before loading resources; clear resources before reconfiguring";
+        return false;
+    }
+    return ocr_res_.configure_wechat(*config);
 }
 
 MaaResId ResourceMgr::post_bundle(const std::filesystem::path& path)
@@ -151,6 +181,16 @@ size_t vec_hash(const std::vector<size_t>& vec)
         seed ^= x + 0x9e3779b9 + (seed << 6) + (seed >> 2);
     }
     return seed;
+}
+
+std::optional<json::object> ResourceMgr::get_load_detail(MaaResId res_id) const
+{
+    std::scoped_lock lock(load_details_mutex_);
+    auto it = load_details_.find(res_id);
+    if (it == load_details_.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 std::string ResourceMgr::get_hash() const
@@ -262,6 +302,10 @@ bool ResourceMgr::clear()
         return false;
     }
 
+    {
+        std::scoped_lock details_lock(load_details_mutex_);
+        load_details_.clear();
+    }
     pipeline_res_.clear();
     ocr_res_.clear();
     inference_res_.clear();
@@ -289,6 +333,7 @@ bool ResourceMgr::override_next(const std::string& node_name, const std::vector<
 {
     LogInfo << VAR(node_name) << VAR(next);
 
+    pipeline_res_.clear_field_source(node_name, "next");
     if (!PipelineParser::parse_next(next, pipeline_res_.get_pipeline_data_map()[node_name].next)) {
         LogError << "failed to parse_next" << VAR(next);
         return false;
@@ -561,16 +606,15 @@ bool ResourceMgr::check_and_set_inference_device()
         }
         else {
             LogWarn << "failed to use inference execution provider, fallback to CPU" << VAR(inference_ep_) << VAR(inference_device_);
-            use_cpu();
+            ret = use_cpu();
         }
     }
 
-    // retried on the next post after a failure, as before
+    // Keep a successful CPU fallback for this resource instead of retrying the failed provider on every post.
     inference_device_setted_ = ret;
     LogInfo << "inference backend resolved" << VAR(inference_ep_) << VAR(inference_device_) << VAR(ret);
 
-    // whether a usable backend is configured: onnxruntime falls back to CPU, NCNN has no fallback
-    return ret || inference_ep_ != MaaInferenceExecutionProvider_NCNN;
+    return ret;
 }
 
 bool ResourceMgr::use_auto_ep()
@@ -595,9 +639,9 @@ bool ResourceMgr::use_auto_ep()
 
 bool ResourceMgr::use_cpu()
 {
-    inference_res_.use_cpu();
-    ocr_res_.use_cpu();
-    return true;
+    const bool inference_success = inference_res_.use_cpu();
+    const bool ocr_success = ocr_res_.use_cpu();
+    return inference_success && ocr_success;
 }
 
 bool ResourceMgr::use_directml()
@@ -629,9 +673,10 @@ bool ResourceMgr::use_directml()
         return false;
     }
 
-    inference_res_.use_directml(device_id);
-    ocr_res_.use_directml(device_id);
-    return true;
+    if (!inference_res_.use_directml(device_id)) {
+        return false;
+    }
+    return ocr_res_.use_directml(device_id);
 }
 
 bool ResourceMgr::use_coreml()
@@ -662,9 +707,9 @@ bool ResourceMgr::use_coreml()
         return false;
     }
 
-    inference_res_.use_coreml(coreml_flag);
-    ocr_res_.use_coreml(coreml_flag);
-    return true;
+    const bool inference_success = inference_res_.use_coreml(coreml_flag);
+    const bool ocr_success = ocr_res_.use_coreml(coreml_flag);
+    return inference_success && ocr_success;
 }
 
 bool ResourceMgr::use_cuda()
@@ -692,9 +737,9 @@ bool ResourceMgr::use_cuda()
         return false;
     }
 
-    inference_res_.use_cuda(device_id);
-    ocr_res_.use_cuda(device_id);
-    return true;
+    const bool inference_success = inference_res_.use_cuda(device_id);
+    const bool ocr_success = ocr_res_.use_cuda(device_id);
+    return inference_success && ocr_success;
 }
 
 bool ResourceMgr::use_webgpu()
@@ -724,8 +769,7 @@ bool ResourceMgr::use_webgpu()
     if (!inference_res_.use_webgpu(device_id)) {
         return false;
     }
-    ocr_res_.use_webgpu(device_id);
-    return true;
+    return ocr_res_.use_webgpu(device_id);
 }
 
 bool ResourceMgr::use_ncnn()
@@ -752,41 +796,60 @@ bool ResourceMgr::run_load(typename AsyncRunner<PostPathItem>::Id id, PostPathIt
     };
 
     notifier_.notify(this, MaaMsg_Resource_Loading_Starting, cb_detail);
+    json::array errors;
+    bool success = false;
 
     if (!check_and_set_inference_device()) {
         // loading on would leave the models to a stale backend, i.e. a silent fallback from NCNN
+        errors.emplace_back(json::object { { "code", "inference_backend_unavailable" } });
         LogError << "no usable inference backend, skip loading" << VAR(item.path);
-        valid_ = false;
+        success = false;
     }
     else {
         switch (item.type) {
         case PostPathType::Bundle:
-            valid_ = load_bundle(item.path);
+            success = load_bundle(item.path, errors);
             break;
         case PostPathType::OcrModel:
-            valid_ = load_ocr_model(item.path);
+            success = load_ocr_model(item.path);
             break;
         case PostPathType::Pipeline:
-            valid_ = load_pipeline(item.path);
+            success = load_pipeline(item.path, errors);
             break;
         case PostPathType::Image:
-            valid_ = load_image(item.path);
+            success = load_image(item.path);
             break;
         default:
             LogError << "Unknown PostPathType" << VAR(static_cast<int>(item.type));
-            valid_ = false;
+            success = false;
             break;
         }
     }
 
+    valid_ = success;
     cb_detail["hash"] = calc_hash();
+    if (!success && errors.empty()) {
+        std::error_code ec;
+        bool exists = std::filesystem::exists(item.path, ec);
+        errors.emplace_back(
+            json::object {
+                { "code", !ec && !exists ? "path_not_found" : "load_failed" },
+                { "file", path_to_utf8_string(item.path) },
+            });
+    }
+    cb_detail["status"] = static_cast<MaaStatus>(success ? MaaStatus_Succeeded : MaaStatus_Failed);
+    cb_detail["errors"] = std::move(errors);
+    {
+        std::scoped_lock lock(load_details_mutex_);
+        load_details_.insert_or_assign(id, cb_detail.as_object());
+    }
 
-    notifier_.notify(this, valid_ ? MaaMsg_Resource_Loading_Succeeded : MaaMsg_Resource_Loading_Failed, cb_detail);
+    notifier_.notify(this, success ? MaaMsg_Resource_Loading_Succeeded : MaaMsg_Resource_Loading_Failed, cb_detail);
 
-    return valid_;
+    return success;
 }
 
-bool ResourceMgr::load_bundle(const std::filesystem::path& path)
+bool ResourceMgr::load_bundle(const std::filesystem::path& path, json::array& errors)
 {
     LogFunc << VAR(path);
 
@@ -817,7 +880,7 @@ bool ResourceMgr::load_bundle(const std::filesystem::path& path)
 
     if (auto p = path / "pipeline"_path; std::filesystem::exists(p)) {
         to_load = true;
-        ret &= pipeline_res_.load(p, default_pipeline_);
+        ret &= pipeline_res_.load(p, default_pipeline_, &errors);
     }
     if (auto p = path / "model"_path / "ocr"_path; std::filesystem::exists(p)) {
         to_load = true;
@@ -855,7 +918,7 @@ bool ResourceMgr::load_ocr_model(const std::filesystem::path& path)
     return ocr_res_.lazy_load(path);
 }
 
-bool ResourceMgr::load_pipeline(const std::filesystem::path& path)
+bool ResourceMgr::load_pipeline(const std::filesystem::path& path, json::array& errors)
 {
     LogFunc << VAR(path);
 
@@ -867,10 +930,10 @@ bool ResourceMgr::load_pipeline(const std::filesystem::path& path)
     paths_.emplace_back(path);
 
     if (std::filesystem::is_directory(path)) {
-        return pipeline_res_.load(path, default_pipeline_);
+        return pipeline_res_.load(path, default_pipeline_, &errors);
     }
 
-    return pipeline_res_.load_file(path, default_pipeline_);
+    return pipeline_res_.load_file(path, default_pipeline_, &errors);
 }
 
 bool ResourceMgr::load_image(const std::filesystem::path& path)

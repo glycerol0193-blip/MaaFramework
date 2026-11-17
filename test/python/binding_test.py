@@ -214,8 +214,16 @@ class MyRecognition(CustomRecognition):
         global analyzed
         analyzed = True
 
+        # 多结果：$all 为回调给出的有序结果，框架不排序
         return CustomRecognition.AnalyzeResult(
-            box=(11, 4, 5, 14), detail={"message": "Hello World!"}
+            box=(11, 4, 5, 14),
+            detail={
+                "message": "Hello World!",
+                "$all": [
+                    {"box": [11, 4, 5, 14], "detail": {"message": "first"}},
+                    {"box": [21, 24, 25, 34], "detail": {"message": "second"}},
+                ],
+            },
         )
 
 
@@ -274,6 +282,19 @@ def test_resource_api():
     r1.use_cpu()
     # NCNN 仅在 Android 构建中可用，这里运行的桌面端构建应设置失败
     assert not r1.use_ncnn()
+
+    # 无效配置和缺失运行时应明确返回 False。
+    assert not r1.configure_wechat_ocr({"runtime_dir": str(Path.cwd().resolve())})
+    assert not r1.configure_wechat_ocr(
+        {"sdk_path": "relative.dll", "runtime_dir": "relative", "ocr_path": "relative.exe"}
+    )
+    assert not r1.configure_wechat_ocr(
+        {
+            "sdk_path": "/test/WeChatOCR.dll",
+            "runtime_dir": "/test/runtime",
+            "ocr_path": "/test/runtime/WeChatOCR.exe",
+        }
+    )
 
     r2 = Resource()
     r2.use_directml(0)
@@ -625,6 +646,7 @@ def test_tasker_api(resource: Resource, controller: DbgController):
             "action": "Custom",
             "custom_action": "MyAct",
             "custom_action_param": "Test111222333",
+            "index": -1,
         },
     }
 
@@ -659,6 +681,27 @@ def test_tasker_api(resource: Resource, controller: DbgController):
     else:
         print("Pipeline task failed")
         raise RuntimeError("Pipeline task failed")
+
+    # 测试自定义识别返回多个结果，index 在回调给出的顺序上选取
+    rec_node = next((node for node in detail.nodes if node.name == "Rec"), None)
+    assert rec_node is not None and rec_node.recognition is not None, (
+        "Rec node should be executed"
+    )
+    multi_detail = tasker.get_recognition_detail(rec_node.recognition.reco_id)
+    assert multi_detail is not None, "get_recognition_detail should return value"
+    assert multi_detail.hit, "multi result recognition should hit"
+    assert len(multi_detail.all_results) == 2, "all_results should have 2 results"
+    assert len(multi_detail.filtered_results) == 2, (
+        "filtered_results should have 2 results"
+    )
+    assert multi_detail.best_result is not None, "best_result should exist"
+    assert [int(value) for value in multi_detail.best_result.box] == [21, 24, 25, 34], (
+        "index -1 should select the last result"
+    )
+    assert multi_detail.best_result.detail == {"message": "second"}, (
+        "per result detail should be kept"
+    )
+    print(f"  multi results: {[result.box for result in multi_detail.filtered_results]}")
 
     # 测试 running 和 stopping
     print(f"  running: {tasker.running}")
@@ -1285,6 +1328,298 @@ def test_binding_init_thread_safety():
     print("  PASS: 8 threads initialised the binding concurrently")
 
 
+def test_tasker_clear_cache():
+    """Clearing history must preserve running and queued jobs (#1578)."""
+    import tempfile
+    import threading
+
+    print("\n=== test_tasker_clear_cache ===")
+    entered = {name: threading.Event() for name in ("Gate", "Pending")}
+    release = {name: threading.Event() for name in entered}
+    calls = []
+    errors = []
+    nested_task_ids = {}
+
+    class Capture(ContextEventSink):
+        def on_raw_notification(self, context, msg, details):
+            if msg in ("Node.PipelineNode.Starting", "Node.RecognitionNode.Succeeded"):
+                if details["name"] in ("NestedTask", "Nested"):
+                    nested_task_ids[details["name"]] = details["task_id"]
+
+    class Gate(CustomAction):
+        def run(self, context, argv):
+            entered[argv.node_name].set()
+            return release[argv.node_name].wait(10)
+
+    class Clear(CustomRecognition):
+        def analyze(self, context, argv):
+            try:
+                assert context.tasker.clear_cache()
+                detail = context.tasker.get_task_detail(argv.task_detail.task_id)
+                assert detail is not None and detail.status.running
+                assert detail.entry == "Entry" and not detail.node_id_list
+                nested = context.clone().run_recognition("Nested", argv.image)
+                assert nested is not None and nested.hit
+                subtask = context.run_task("NestedTask")
+                assert subtask is not None and subtask.status.succeeded
+                assert context.tasker.clear_cache()
+                # Completed Context tasks and recognition-only histories must not leak.
+                for task_id in nested_task_ids.values():
+                    assert context.tasker.get_task_detail(task_id) is None
+                calls.append("clear")
+            except Exception as exc:
+                errors.append(repr(exc))
+            return None
+
+    class Hit(CustomRecognition):
+        def analyze(self, context, argv):
+            calls.append(argv.node_name)
+            return (0, 0, 1, 1)
+
+    class Finish(CustomAction):
+        def run(self, context, argv):
+            calls.append("action")
+            return argv.task_detail.status.running
+
+    class ClearSubtask(CustomAction):
+        def run(self, context, argv):
+            try:
+                assert context.tasker.clear_cache()
+                detail = context.tasker.get_task_detail(nested_task_ids["NestedTask"])
+                assert detail is not None and detail.status.running
+                assert detail.entry == "NestedTask" and not detail.node_id_list
+                return True
+            except Exception as exc:
+                errors.append(repr(exc))
+                return False
+
+    waiters = []
+    results = {}
+
+    def start_waiter(name, job):
+        started = threading.Event()
+        done = threading.Event()
+
+        def wait():
+            started.set()
+            # Check the actual C return value as C# clients do, too.
+            results[name] = Library.framework().MaaTaskerWait(tasker._handle, job.job_id)
+            done.set()
+
+        thread = threading.Thread(target=wait, daemon=True)
+        waiters.append(thread)
+        thread.start()
+        assert started.wait(5)
+        assert not done.wait(0.05), f"{name}: wait returned before the job ran"
+        return done
+
+    with tempfile.TemporaryDirectory() as temporary:
+        (Path(temporary) / "pipeline").mkdir()
+        (Path(temporary) / "pipeline" / "empty.json").write_text("{}", encoding="utf-8")
+        resource = Resource()
+        assert resource.use_cpu()
+        assert resource.post_bundle(Path(temporary)).wait().succeeded
+        assert resource.register_custom_action("Gate", Gate())
+        assert resource.register_custom_action("Finish", Finish())
+        assert resource.register_custom_action("ClearSubtask", ClearSubtask())
+        assert resource.register_custom_recognition("Clear", Clear())
+        assert resource.register_custom_recognition("Hit", Hit())
+        controller = MyController(numpy.zeros((32, 32, 3), dtype=numpy.uint8))
+        assert controller.post_connection().wait().succeeded
+        tasker = Tasker()
+        assert tasker.bind(resource, controller)
+        tasker.add_context_sink(Capture())
+        nodes = {
+            "Finished": {},
+            "Entry": {"next": ["Gate"]},
+            "Gate": {"action": "Custom", "custom_action": "Gate", "next": ["Clear", "Hit"]},
+            "Pending": {"action": "Custom", "custom_action": "Gate"},
+            "Clear": {"recognition": "Custom", "custom_recognition": "Clear"},
+            "Hit": {"recognition": "Custom", "custom_recognition": "Hit", "action": "Custom", "custom_action": "Finish"},
+            "Nested": {"recognition": "Custom", "custom_recognition": "Hit"},
+            "NestedTask": {"action": "Custom", "custom_action": "ClearSubtask"},
+        }
+        pipeline = {
+            name: {"pre_delay": 0, "post_delay": 0, "rate_limit": 0, "timeout": 2000, **node}
+            for name, node in nodes.items()
+        }
+        finished = tasker.post_task("Finished", pipeline).wait()
+        assert finished.succeeded
+        old_node = finished.get().nodes[0]
+        running = tasker.post_task("Entry", pipeline)
+        try:
+            assert entered["Gate"].wait(5)
+            pending = tasker.post_task("Pending", pipeline)
+            assert running.running and pending.pending
+            assert running.get().node_id_list
+            start_waiter("before_clear", running)
+
+            for _ in range(2):
+                assert tasker.clear_cache()
+                assert running.running, "clear_cache invalidated the running job"
+                assert pending.pending, "clear_cache invalidated the queued job"
+                for job, entry in ((running, "Entry"), (pending, "Pending")):
+                    detail = job.get()
+                    assert detail is not None and detail.entry == entry
+                    assert not detail.node_id_list
+                assert finished.get() is None
+                assert tasker.get_node_detail(old_node.node_id) is None
+                assert tasker.get_recognition_detail(old_node.recognition.reco_id) is None
+                assert tasker.get_latest_node("Finished") is None
+
+            assert running.override_pipeline({"Hit": {"focus": "after-clear"}})
+            assert pending.override_pipeline({"Pending": {"focus": "after-clear"}})
+            start_waiter("after_clear", running)
+            pending_done = start_waiter("pending", pending)
+            release["Gate"].set()
+            assert entered["Pending"].wait(5)
+            assert not pending_done.is_set()
+            release["Pending"].set()
+            for waiter in waiters:
+                waiter.join(5)
+                assert not waiter.is_alive(), "wait did not finish"
+            assert all(int(status) == 3000 for status in results.values()), results
+            assert running.succeeded and pending.succeeded
+            assert not errors, errors
+            assert calls == ["Nested", "clear", "Hit", "action"], calls
+            assert running.get().status.succeeded and pending.get().status.succeeded
+
+            assert tasker.clear_cache()
+            assert running.get() is None and pending.get() is None
+            for job in (running, pending):
+                assert Library.framework().MaaTaskerStatus(tasker._handle, job.job_id) == 0
+
+            # post_stop cancels queued work without running its completion path.
+            entered["Gate"].clear()
+            release["Gate"].clear()
+            pipeline["Gate"]["next"] = []
+            tasker.post_task("Gate", pipeline)
+            assert entered["Gate"].wait(5)
+            cancelled = tasker.post_task("Pending", pipeline)
+            stop = tasker.post_stop()
+            release["Gate"].set()
+            stop.wait()
+            assert tasker.clear_cache()
+            assert cancelled.get() is None, "cancelled pending details must be reclaimable"
+        finally:
+            for event in release.values():
+                event.set()
+            tasker.post_stop().wait()
+            for waiter in waiters:
+                waiter.join(5)
+
+    print("  PASS: clear_cache preserves live jobs, callbacks and trimmed task details")
+
+
+def test_neural_network_cache():
+    """Exercise cache sharing and lifetime through real pipeline execution (#1504)."""
+    import shutil
+    import tempfile
+
+    print("\n=== test_neural_network_cache ===")
+
+    class FrameController(MyController):
+        def __init__(self):
+            super().__init__()
+            self.frames = [255]
+            self.frame_index = 0
+
+        def screencap(self):
+            value = self.frames[min(self.frame_index, len(self.frames) - 1)]
+            self.frame_index += 1
+            return numpy.full((32, 32, 3), value, dtype=numpy.uint8)
+
+    class Capture(ContextEventSink):
+        def __init__(self):
+            self.results = []
+
+        def on_raw_notification(self, context, msg, details):
+            if msg in ("Node.Recognition.Succeeded", "Node.Recognition.Failed"):
+                self.results.append(details["reco_details"])
+
+    with tempfile.TemporaryDirectory() as temporary:
+        bundle = Path(temporary)
+        models = install_dir / "test" / "NeuralNetworkCache"
+        for algorithm in ("classify", "detect"):
+            model_dir = bundle / "model" / algorithm
+            model_dir.mkdir(parents=True)
+            source = "classifier" if algorithm == "classify" else "detector"
+            shutil.copyfile(models / f"{source}.onnx", model_dir / "test.onnx")
+
+        resource = Resource()
+        assert resource.use_cpu()
+        assert resource.post_bundle(bundle).wait().succeeded
+        controller = FrameController()
+        controller.set_screenshot_use_raw_size(True)
+        assert controller.post_connection().wait().succeeded
+        tasker = Tasker()
+        assert tasker.bind(resource, controller)
+        capture = Capture()
+        tasker.add_context_sink(capture)
+
+        def run(nodes, frames=(255,)):
+            capture.results.clear()
+            controller.frames = list(frames)
+            controller.frame_index = 0
+            pipeline = {
+                name: {"pre_delay": 0, "post_delay": 0, "rate_limit": 0, "timeout": 2000, **node}
+                for name, node in nodes.items()
+            }
+            assert tasker.post_task("Entry", pipeline).wait().succeeded
+            return [r for r in capture.results if r["algorithm"] != "DirectHit"]
+
+        classify = {"recognition": "NeuralNetworkClassify", "model": "test.onnx", "labels": ["white", "black"]}
+        results = run({
+            "Entry": {"next": ["Miss", "Hit"]},
+            "Miss": {**classify, "expected": [1]},
+            "Hit": {**classify, "expected": ["renamed"], "labels": ["renamed", "other"], "index": -1},
+        })
+        assert len(results) == 2 and results[0]["box"] is None
+        assert results[1]["detail"]["best"]["label"] == "renamed"
+        assert results[0]["detail"]["all"][0]["score"] == results[1]["detail"]["all"][0]["score"]
+        assert results[0]["reco_id"] != results[1]["reco_id"]
+
+        # Copied Recognizers in composite algorithms share the same frame cache.
+        results = run({
+            "Entry": {"next": ["Composite"]},
+            "Composite": {"recognition": {"type": "Or", "param": {"any_of": ["Miss", "Hit"]}}},
+            "Miss": {**classify, "expected": [1]},
+            "Hit": {**classify, "expected": [0]},
+        })
+        assert results[0]["algorithm"] == "Or"
+        assert len(results[0]["detail"]) == 2
+        assert results[0]["detail"][1]["detail"]["best"]["cls_index"] == 0
+
+        # An unsuccessful polling round must release its white-frame prediction.
+        results = run({
+            "Entry": {"next": ["Miss", "Never"]},
+            "Miss": {**classify, "expected": [1]},
+            "Never": {**classify, "expected": [2]},
+        }, frames=(255, 0))
+        assert controller.frame_index == 2
+        assert [r["detail"]["all"][0]["cls_index"] for r in results] == [0, 0, 1]
+
+        # Hitting a node must also release the cache before the next screenshot.
+        results = run({
+            "Entry": {"next": ["White"]},
+            "White": {**classify, "expected": [0], "next": ["Black"]},
+            "Black": {**classify, "expected": [1]},
+        }, frames=(255, 0))
+        assert [r["detail"]["best"]["cls_index"] for r in results] == [0, 1]
+
+        detect = {"recognition": "NeuralNetworkDetect", "model": "test.onnx", "labels": ["first", "second"]}
+        results = run({
+            "Entry": {"next": ["High", "Low"]},
+            "High": {**detect, "expected": [0], "threshold": 0.95},
+            "Low": {**detect, "expected": ["second"], "threshold": 0.5},
+        })
+        assert results[0]["box"] is None and len(results[0]["detail"]["all"]) == 2
+        assert results[1]["detail"]["best"]["cls_index"] == 1
+        assert results[1]["box"] == [20, 20, 8, 8]
+
+    print("  PASS: neural network cache pipeline semantics and frame lifetime")
+
+
 if __name__ == "__main__":
     print(f"MaaFw Version: {Library.version()}")
 
@@ -1333,6 +1668,10 @@ if __name__ == "__main__":
 
     # 回归：并发初始化线程安全 (#629)
     test_binding_init_thread_safety()
+    from runtime_events_test import test_runtime_event_bindings
+    test_runtime_event_bindings()
+    test_tasker_clear_cache()
+    test_neural_network_cache()
 
     print("\n" + "=" * 50)
     print("All binding tests passed!")

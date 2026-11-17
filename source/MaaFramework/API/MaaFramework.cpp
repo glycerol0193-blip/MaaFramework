@@ -45,6 +45,31 @@ MaaController* MaaAdbControllerCreate(
     return new MAA_CTRL_NS::ControllerAgent(std::move(control_unit));
 }
 
+MaaController* MaaIOSControllerCreate(
+    const char* udid,
+    MaaIOSScreencapMethod screencap_methods,
+    MaaIOSConnectionMethod connection_method,
+    const char* config_json)
+{
+    const char* selected_udid = udid ? udid : "";
+    LogFunc << VAR(selected_udid) << VAR(screencap_methods) << VAR(connection_method);
+
+    if (!udid || !*udid) {
+        LogError << "iOS device UDID is required";
+        return nullptr;
+    }
+
+    auto control_unit =
+        MAA_NS::IOSControlUnitLibraryHolder::create_control_unit(selected_udid, screencap_methods, connection_method, config_json);
+
+    if (!control_unit) {
+        LogError << "Failed to create control unit";
+        return nullptr;
+    }
+
+    return new MAA_CTRL_NS::ControllerAgent(std::move(control_unit));
+}
+
 MaaController* MaaWin32ControllerCreate(
     void* hWnd,
     MaaWin32ScreencapMethod screencap_method,
@@ -405,6 +430,31 @@ MaaBool MaaGlobalLoadPlugin(const char* library_path)
     }
 
     return MAA_GLOBAL_NS::PluginMgr::get_instance().load(MAA_NS::path(library_path));
+}
+
+MaaBool MaaGlobalGetPluginList(MaaStringListBuffer* buffer)
+{
+    if (!buffer) {
+        return false;
+    }
+    MaaStringListBufferClear(buffer);
+    auto* item = MaaStringBufferCreate();
+    for (const auto& name : MAA_GLOBAL_NS::PluginMgr::get_instance().get_names()) {
+        MaaStringBufferSet(item, name.c_str());
+        MaaStringListBufferAppend(buffer, item);
+    }
+    MaaStringBufferDestroy(item);
+    return true;
+}
+
+MaaBool MaaGlobalFlushPlugins()
+{
+    return MAA_GLOBAL_NS::PluginMgr::get_instance().flush();
+}
+
+MaaBool MaaGlobalShutdownPlugins()
+{
+    return MAA_GLOBAL_NS::PluginMgr::get_instance().shutdown();
 }
 
 MaaBool MaaSetGlobalOption(MaaGlobalOption key, MaaOptionValue value, MaaOptionValueSize val_size)

@@ -704,6 +704,15 @@ bool PipelineParser::parse_ocrer_param(
         return false;
     }
 
+    if (!get_and_check_value(input, "engine", output.engine, default_value.engine)) {
+        LogError << "failed to get_and_check_value engine" << VAR(input);
+        return false;
+    }
+    if (output.engine != "Default" && output.engine != "WeChatOCR") {
+        LogError << "Unknown OCR engine" << VAR(output.engine);
+        return false;
+    }
+
     if (!get_and_check_value(input, "model", output.model, default_value.model)) {
         LogError << "failed to get_and_check_value model" << VAR(input);
         return false;
@@ -711,6 +720,10 @@ bool PipelineParser::parse_ocrer_param(
 
     if (!get_and_check_value(input, "only_rec", output.only_rec, default_value.only_rec)) {
         LogError << "failed to get_and_check_value only_rec" << VAR(input);
+        return false;
+    }
+    if (output.engine == "WeChatOCR" && (output.only_rec || !output.model.empty())) {
+        LogError << "WeChatOCR requires only_rec=false and an empty model" << VAR(input);
         return false;
     }
 
@@ -734,6 +747,7 @@ bool PipelineParser::parse_ocrer_param(
     else {
         u8_text = u8_default_text;
     }
+    output.expected.clear();
     std::ranges::transform(u8_text, std::back_inserter(output.expected), to_u16);
 
     if (!get_and_check_value(input, "threshold", output.threshold, default_value.threshold)) {
@@ -781,6 +795,12 @@ bool PipelineParser::parse_custom_recognition_param(
     MAA_VISION_NS::CustomRecognitionParam& output,
     const MAA_VISION_NS::CustomRecognitionParam& default_value)
 {
+    // 多结果由回调自行排序，order_by 对 Custom 无意义
+    if (input.contains("order_by") || input.contains("order")) {
+        LogError << "Custom recognition does not support order_by, sort the results inside the callback" << VAR(input);
+        return false;
+    }
+
     if (!get_and_check_value(input, "custom_recognition", output.name, default_value.name)) {
         LogError << "failed to get_and_check_value custom_recognition" << VAR(input);
         return false;
@@ -792,6 +812,11 @@ bool PipelineParser::parse_custom_recognition_param(
     }
 
     output.custom_param = input.get("custom_recognition_param", default_value.custom_param);
+
+    if (!get_and_check_value(input, "index", output.result_index, default_value.result_index)) {
+        LogError << "failed to get_and_check_value index" << VAR(input);
+        return false;
+    }
 
     return true;
 }

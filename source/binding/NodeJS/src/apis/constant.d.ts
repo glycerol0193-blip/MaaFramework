@@ -21,7 +21,7 @@ declare global {
          * | RawByNetcat           | Fast       | Low           | Lossless |                                   |
          * | MinicapDirect         | Fast       | Low           | Lossy    |                                   |
          * | MinicapStream         | Very Fast  | Low           | Lossy    |                                   |
-         * | EmulatorExtras        | Very Fast  | Low           | Lossless | Emulators only: MuMu 12, LDPlayer 9 |
+         * | EmulatorExtras        | Very Fast  | Low           | Lossless | Emulators only: MuMu 12, LDPlayer 9, AVD, Androws, ModAVD |
          */
         const AdbScreencapMethod: Record<
             | 'EncodeToFileAndPull'
@@ -51,10 +51,31 @@ declare global {
          * | AdbShell             | Slow  | High          |                                       |
          * | MinitouchAndAdbKey   | Fast  | Medium        | Key press still uses AdbShell         |
          * | Maatouch             | Fast  | Medium        |                                       |
-         * | EmulatorExtras       | Fast  | Low           | Emulators only: MuMu 12               |
+         * | EmulatorExtras       | Fast  | Low           | Emulators only: MuMu 12, Androws, ModAVD       |
          */
         const AdbInputMethod: Record<
             'AdbShell' | 'MinitouchAndAdbKey' | 'Maatouch' | 'EmulatorExtras' | 'All' | 'Default',
+            ScreencapOrInputMethods
+        >
+
+        const IOSConnectionMethod: Record<'Auto' | 'USB' | 'WiFi', number>
+
+        /**
+         * iOS screencap method flags.
+         *
+         * Use bitwise OR to select the permitted backends. Video frames are preferred
+         * when Stream is enabled; ScreenshotService provides a lossless RPC fallback.
+         * Stream alone has no screenshot fallback. ScreenshotService alone starts no
+         * video session or background video decoder. Stream carries lossy HEVC video.
+         *
+         * Default: All methods. Reported availability describes supported backends,
+         * not a guarantee that every connected device/DDI exposes both services.
+         */
+        const IOSScreencapMethod: Record<
+            | 'Stream'
+            | 'ScreenshotService'
+            | 'All'
+            | 'Default',
             ScreencapOrInputMethods
         >
 

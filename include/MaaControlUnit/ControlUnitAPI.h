@@ -13,10 +13,10 @@
 
 MAA_CTRL_UNIT_NS_BEGIN
 
-class ControlUnitAPI
+class MAA_CONTROL_UNIT_TYPES_API ControlUnitAPI
 {
 public:
-    virtual ~ControlUnitAPI() = default;
+    virtual ~ControlUnitAPI();
 
     virtual bool connect() = 0;
     virtual bool connected() const = 0;
@@ -49,26 +49,26 @@ public:
 
 // Capability mixins: optional interfaces that controllers may support
 
-class ScrollableUnit
+class MAA_CONTROL_UNIT_TYPES_API ScrollableUnit
 {
 public:
-    virtual ~ScrollableUnit() = default;
+    virtual ~ScrollableUnit();
 
     virtual bool scroll(int dx, int dy) = 0;
 };
 
-class RelativeMovableUnit
+class MAA_CONTROL_UNIT_TYPES_API RelativeMovableUnit
 {
 public:
-    virtual ~RelativeMovableUnit() = default;
+    virtual ~RelativeMovableUnit();
 
     virtual bool relative_move(int dx, int dy) = 0;
 };
 
-class ShellableUnit
+class MAA_CONTROL_UNIT_TYPES_API ShellableUnit
 {
 public:
-    virtual ~ShellableUnit() = default;
+    virtual ~ShellableUnit();
 
     virtual bool
         shell(const std::string& cmd, std::string& output, std::chrono::milliseconds timeout = std::chrono::milliseconds(20000)) = 0;
@@ -84,6 +84,12 @@ public:
     virtual ~AdbControlUnitAPI() = default;
 
     virtual bool find_device(/*out*/ std::vector<std::string>& devices) = 0;
+};
+
+class IOSControlUnitAPI : public ControlUnitAPI
+{
+public:
+    virtual ~IOSControlUnitAPI() = default;
 };
 
 class AndroidNativeControlUnitAPI : public ControlUnitAPI
@@ -171,6 +177,7 @@ MAA_CTRL_UNIT_NS_END
 
 using MaaControlUnitHandle = MAA_CTRL_UNIT_NS::ControlUnitAPI*;
 using MaaAdbControlUnitHandle = MAA_CTRL_UNIT_NS::AdbControlUnitAPI*;
+using MaaIOSControlUnitHandle = MAA_CTRL_UNIT_NS::IOSControlUnitAPI*;
 using MaaWin32ControlUnitHandle = MAA_CTRL_UNIT_NS::Win32ControlUnitAPI*;
 using MaaMacOSControlUnitHandle = MAA_CTRL_UNIT_NS::MacOSControlUnitAPI*;
 using MaaLinuxControlUnitHandle = MAA_CTRL_UNIT_NS::LinuxControlUnitAPI*;

@@ -78,10 +78,11 @@ struct JOCR
     std::string order_by;
     int index = 0;
     bool only_rec = false;
+    std::string engine = "Default";
     std::string model;
     std::string color_filter;
 
-    MEO_TOJSON(roi, roi_offset, expected, threshold, replace, order_by, index, only_rec, model, color_filter);
+    MEO_TOJSON(roi, roi_offset, expected, threshold, replace, order_by, index, only_rec, engine, model, color_filter);
 };
 
 struct JNeuralNetworkClassify
@@ -117,8 +118,9 @@ struct JCustomRecognition
     JRect roi_offset;
     std::string custom_recognition;
     json::value custom_recognition_param;
+    int index = 0;
 
-    MEO_TOJSON(roi, roi_offset, custom_recognition, custom_recognition_param);
+    MEO_TOJSON(roi, roi_offset, custom_recognition, custom_recognition_param, index);
 };
 
 struct JSubRecognition;

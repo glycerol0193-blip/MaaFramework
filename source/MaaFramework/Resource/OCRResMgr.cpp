@@ -4,12 +4,14 @@
 #include <ranges>
 
 #include "FastDeployOCRSession.h"
+#include "InferenceContext.h"
 #include "MaaUtils/File.hpp"
 #include "MaaUtils/Logger.h"
 #include "MaaUtils/Platform.h"
 #include "MaaUtils/StringMisc.hpp"
 #include "NcnnOCRSession.h"
 #include "NcnnSession.h"
+#include "WeChatOCRSession.h"
 
 MAA_RES_NS_BEGIN
 
@@ -21,7 +23,7 @@ OCRResMgr::OCRResMgr()
     rec_option_.UseOrtBackend();
 }
 
-void OCRResMgr::use_cpu()
+bool OCRResMgr::use_cpu()
 {
     LogInfo;
 
@@ -32,9 +34,10 @@ void OCRResMgr::use_cpu()
 
     det_option_.SetCpuThreadNum(4);
     rec_option_.SetCpuThreadNum(4);
+    return true;
 }
 
-void OCRResMgr::use_cuda(int device_id)
+bool OCRResMgr::use_cuda(int device_id)
 {
     LogInfo << VAR(device_id);
 
@@ -50,9 +53,10 @@ void OCRResMgr::use_cuda(int device_id)
     det_option_.UseCuda(device_id);
     rec_option_.UseCuda(device_id);
 #endif
+    return true;
 }
 
-void OCRResMgr::use_directml(int device_id)
+bool OCRResMgr::use_directml(int device_id)
 {
     LogInfo << VAR(device_id);
 
@@ -60,9 +64,10 @@ void OCRResMgr::use_directml(int device_id)
 
     det_option_.UseDirectML(device_id);
     rec_option_.UseDirectML(device_id);
+    return true;
 }
 
-void OCRResMgr::use_webgpu(int device_id)
+bool OCRResMgr::use_webgpu(int device_id)
 {
     LogInfo << VAR(device_id);
 
@@ -70,6 +75,7 @@ void OCRResMgr::use_webgpu(int device_id)
 
     det_option_.UseWebGPU(device_id);
     rec_option_.UseWebGPU(device_id);
+    return true;
 }
 
 bool OCRResMgr::use_ncnn()
@@ -87,11 +93,11 @@ bool OCRResMgr::use_ncnn()
 #endif
 }
 
-void OCRResMgr::use_coreml(uint32_t coreml_flag)
+bool OCRResMgr::use_coreml(uint32_t coreml_flag)
 {
     LogWarn << "CoreML is deprecated and no longer shipped. OCR falls back to CPU; use WebGPU instead" << VAR(coreml_flag);
 
-    use_cpu();
+    return use_cpu();
 }
 
 bool OCRResMgr::lazy_load(const std::filesystem::path& path)
@@ -139,12 +145,36 @@ void OCRResMgr::clear()
     recers_.clear();
     ocrers_.clear();
     sessions_.clear();
+    wechat_session_.reset();
 }
 
-MAA_VISION_NS::OCRSessionPtr OCRResMgr::session(const std::string& name)
+bool OCRResMgr::configure_wechat(const json::value& config)
+{
+    auto session = WeChatOCRSession::create(config);
+    if (!session) {
+        return false;
+    }
+    std::unique_lock lock(session_mutex_);
+    wechat_session_ = std::move(session);
+    return true;
+}
+
+MAA_VISION_NS::OCRSessionPtr OCRResMgr::session(const std::string& name, const std::string& engine)
 {
     // multiple taskers may share one resource, guard lookup + load + insert
     std::unique_lock lock(session_mutex_);
+
+    if (engine == "WeChatOCR") {
+        if (!name.empty() || !wechat_session_) {
+            LogError << "WeChatOCR needs a configured runtime and an empty model" << VAR(name);
+            return nullptr;
+        }
+        return wechat_session_;
+    }
+    if (engine != "Default") {
+        LogError << "Unknown OCR engine" << VAR(engine);
+        return nullptr;
+    }
 
     if (auto iter = sessions_.find(name); iter != sessions_.end()) {
         return iter->second;
@@ -267,7 +297,8 @@ std::shared_ptr<fastdeploy::vision::ocr::DBDetector> OCRResMgr::load_deter(const
         }
         LogDebug << VAR(model_path);
 
-        auto det = std::make_shared<fastdeploy::vision::ocr::DBDetector>(
+        const InferenceContext context(det_option_.device != fastdeploy::Device::CPU);
+        auto det = context.make_shared<fastdeploy::vision::ocr::DBDetector>(
             path_to_utf8_string(model_path),
             std::string(),
             det_option_,
@@ -297,7 +328,8 @@ std::shared_ptr<fastdeploy::vision::ocr::Recognizer> OCRResMgr::load_recer(const
         }
         LogDebug << VAR(model_path);
 
-        auto rec = std::make_shared<fastdeploy::vision::ocr::Recognizer>(
+        const InferenceContext context(rec_option_.device != fastdeploy::Device::CPU);
+        auto rec = context.make_shared<fastdeploy::vision::ocr::Recognizer>(
             path_to_utf8_string(model_path),
             std::string(),
             path_to_utf8_string(label_path),
@@ -326,7 +358,9 @@ std::shared_ptr<fastdeploy::pipeline::PPOCRv4> OCRResMgr::load_ocrer(const std::
         return nullptr;
     }
 
-    auto ocr = std::make_shared<fastdeploy::pipeline::PPOCRv4>(det.get(), rec.get());
+    const InferenceContext context(
+        det->runtime_option.device != fastdeploy::Device::CPU || rec->runtime_option.device != fastdeploy::Device::CPU);
+    auto ocr = context.make_shared<fastdeploy::pipeline::PPOCRv4>(det.get(), rec.get());
 
     if (!ocr || !ocr->Initialized()) {
         LogError << "Failed to load PPOCRv4:" << VAR(name) << VAR(ocr) << VAR(ocr->Initialized());

@@ -11,6 +11,7 @@
 #include <onnxruntime/onnxruntime_cxx_api.h>
 
 #include "Common/Conf.h"
+#include "InferenceContext.h"
 #include "MaaUtils/NonCopyable.hpp"
 #include "Vision/InferenceSession.h"
 
@@ -23,12 +24,13 @@ class InferenceResMgr : public NonCopyable
 {
 public:
     InferenceResMgr();
+    ~InferenceResMgr();
 
 public:
-    void use_cpu();
-    void use_cuda(int device_id);
-    void use_directml(int device_id);
-    void use_coreml(uint32_t coreml_flag);
+    bool use_cpu();
+    bool use_cuda(int device_id);
+    bool use_directml(int device_id);
+    bool use_coreml(uint32_t coreml_flag);
     bool use_webgpu(int device_id);
     // returns false if MaaFW is built without NCNN
     bool use_ncnn();
@@ -60,6 +62,7 @@ private:
 #endif
 
     Ort::Env env_ = Ort::Env(ORT_LOGGING_LEVEL_FATAL, "MaaFW");
+    InferenceContext context_;
     Ort::SessionOptions options_;
     Ort::MemoryInfo memory_info_;
 

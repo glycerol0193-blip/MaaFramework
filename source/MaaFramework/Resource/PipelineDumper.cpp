@@ -175,6 +175,7 @@ PipelineV2::JRecognition PipelineDumper::dump_reco(Recognition::Type type, const
             .order_by = dump_order_by(p.order_by),
             .index = p.result_index,
             .only_rec = p.only_rec,
+            .engine = p.engine,
             .model = p.model,
             .color_filter = p.color_filter,
         };
@@ -269,6 +270,7 @@ PipelineV2::JRecognition PipelineDumper::dump_reco(Recognition::Type type, const
             .roi_offset = dump_rect(p.roi_target.offset),
             .custom_recognition = p.name,
             .custom_recognition_param = p.custom_param,
+            .index = p.result_index,
         };
     } break;
 

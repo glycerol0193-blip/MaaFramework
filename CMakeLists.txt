@@ -8,6 +8,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 include(source/MaaUtils/MaaUtils.cmake)
 
 option(WITH_ADB_CONTROLLER "build with adb controller" ON)
+option(WITH_IOS_CONTROLLER "build with iOS controller via XDeviceBridge" ON)
 option(WITH_WIN32_CONTROLLER "build with win32 controller" ON)
 option(WITH_MACOS_CONTROLLER "build with macOS controller" ON)
 option(WITH_ANDROID_NATIVE_CONTROLLER "build with Android native controller" ON)
@@ -25,13 +26,15 @@ option(WITH_QUICKJS_BINDING "build with quickjs binding" OFF)
 option(WITH_MAA_AGENT "build with MaaAgent" ON)
 option(WITH_NCNN "build with ncnn inference backend (Android only)" ${ANDROID})
 
-option(BUILD_PICLI "build maa picli" ON)
 option(BUILD_SAMPLE "build a demo" OFF)
 option(BUILD_PIPELINE_TESTING "build pipeline testing" OFF)
 option(BUILD_DLOPEN_TESTING "build dlopen testing" OFF)
 option(BUILD_NODE_TEST "build node test" OFF)
 option(BUILD_MACOS_TEST "build macOS test" OFF)
 option(BUILD_LINUX_TEST "build Linux test" OFF)
+option(BUILD_IOS_TEST "build iOS test" OFF)
+option(BUILD_ADB_PIPE_TESTING "build POSIX ADB child-pipe regression tests" OFF)
+option(BUILD_TOOLKIT_VBOX_TESTING "build VBox emulator discovery regression tests" OFF)
 
 option(ENABLE_CCACHE "enable ccache if possible" ON)
 option(ENABLE_HASH_VERSION "enable hash version from git" OFF)
@@ -44,6 +47,11 @@ set(MAA_PRIVATE_INC ${CMAKE_SOURCE_DIR}/source/include)
 if(NOT WITH_REPLAY_CONTROLLER)
     message(STATUS "Replay controller is disabled, disable BUILD_PIPELINE_TESTING")
     set(BUILD_PIPELINE_TESTING OFF)
+endif()
+
+if(NOT WITH_IOS_CONTROLLER)
+    message(STATUS "iOS controller is disabled, disable BUILD_IOS_TEST")
+    set(BUILD_IOS_TEST OFF)
 endif()
 
 # check options
@@ -91,13 +99,33 @@ add_subdirectory(3rdparty)
 add_subdirectory(source)
 add_subdirectory(tools)
 
+target_include_directories(
+    MaaUtils
+    PUBLIC $<BUILD_INTERFACE:${MAAUTILS_DIR}/include> $<INSTALL_INTERFACE:include>
+    PRIVATE ${MAA_PUBLIC_INC})
+# Core and dynamically loaded control units must resolve capability RTTI from one
+# shared dependency, including hosts that load MaaFramework with RTLD_LOCAL.
+target_sources(MaaUtils PRIVATE source/ControlUnitCommon/ControlUnitAPI.cpp)
+target_compile_definitions(MaaUtils PRIVATE MAA_CONTROL_UNIT_TYPES_EXPORTS)
+# MaaUtils public headers expose Boost and OpenCV types.
+target_link_libraries(
+    MaaUtils PUBLIC Boost::headers Boost::system ${OpenCV_LIBS})
+
+if(LINUX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(MaaUtils PUBLIC Threads::Threads)
+endif()
+
 if(BUILD_SAMPLE)
     add_subdirectory(sample/cpp)
 endif()
 
 if(BUILD_PIPELINE_TESTING)
+    enable_testing()
+    add_subdirectory(test/plugin)
     add_subdirectory(test/pipeline)
     add_subdirectory(test/TestingDataSet)
+    add_subdirectory(test/wechat_ocr)
     if(WITH_MAA_AGENT)
         add_subdirectory(test/agent)
     endif()
@@ -105,6 +133,19 @@ endif()
 
 if(BUILD_DLOPEN_TESTING)
     add_subdirectory(test/dlopen)
+endif()
+
+if(BUILD_ADB_PIPE_TESTING)
+    if(NOT UNIX OR ANDROID OR NOT WITH_ADB_CONTROLLER)
+        message(FATAL_ERROR "BUILD_ADB_PIPE_TESTING requires a POSIX host and WITH_ADB_CONTROLLER")
+    endif()
+    enable_testing()
+    add_subdirectory(test/adb_pipe)
+endif()
+
+if(BUILD_TOOLKIT_VBOX_TESTING)
+    enable_testing()
+    add_subdirectory(test/toolkit_vbox)
 endif()
 
 if(BUILD_NODE_TEST)
@@ -116,8 +157,20 @@ if(BUILD_MACOS_TEST)
 endif()
 
 if (BUILD_LINUX_TEST)
+    enable_testing()
     add_subdirectory(test/linux_test)
 endif ()
+
+if(BUILD_IOS_TEST)
+    enable_testing()
+    add_subdirectory(test/ios_test)
+endif()
+
+option(BUILD_WIN32_GEOMETRY_TESTING "build Windows window geometry regression tests" OFF)
+if(WIN32 AND BUILD_WIN32_GEOMETRY_TESTING)
+    enable_testing()
+    add_subdirectory(test/win32_test/window_geometry)
+endif()
 
 maadeps_install(bin)
 
@@ -125,8 +178,12 @@ install(
     TARGETS MaaUtils
     EXPORT MaaFrameworkTargets
     RUNTIME DESTINATION bin
-    LIBRARY DESTINATION bin # ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION bin
+    ARCHIVE DESTINATION lib
 )
+
+install(DIRECTORY "${MAAUTILS_DIR}/include/MaaUtils" DESTINATION "include")
+install(DIRECTORY "${MAAUTILS_DIR}/include/meojson" DESTINATION "include")
 
 if(WIN32)
     install(FILES $<TARGET_PDB_FILE:MaaUtils> DESTINATION symbol OPTIONAL)

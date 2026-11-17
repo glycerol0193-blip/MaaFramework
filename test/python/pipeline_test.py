@@ -92,6 +92,11 @@ def assert_true(condition, msg=""):
         raise AssertionError(f"{msg}: expected True")
 
 
+def assert_false(condition, msg=""):
+    if condition:
+        raise AssertionError(f"{msg}: expected False")
+
+
 def assert_not_none(value, msg=""):
     if value is None:
         raise AssertionError(f"{msg}: expected not None")
@@ -306,6 +311,69 @@ class PipelineTestRecognition(CustomRecognition):
 
         # 12. 比较 Context 和 Resource 级别
         self._test_context_vs_resource(context)
+
+        self._test_ocr_engine(context)
+
+    def _test_ocr_engine(self, context: Context):
+        print("  Testing OCR engine parsing and override...")
+        new_ctx = context.clone()
+        assert_true(
+            new_ctx.override_pipeline(
+                {"OcrEngine": {"recognition": "OCR", "expected": "开始"}}
+            ),
+            "create default OCR node",
+        )
+        assert_eq(
+            new_ctx.get_node_object("OcrEngine").recognition.param.engine,
+            "Default",
+            "existing OCR nodes retain the default engine",
+        )
+        assert_true(
+            new_ctx.override_pipeline({"OcrEngine": {"engine": "WeChatOCR"}}),
+            "select WeChatOCR with v1 override",
+        )
+        param = new_ctx.get_node_object("OcrEngine").recognition.param
+        assert_eq(param.engine, "WeChatOCR", "engine dataclass round trip")
+        assert_eq(param.expected, ["开始"], "engine override retains expected")
+        assert_eq(
+            new_ctx.get_node_data("OcrEngine")["recognition"]["param"]["engine"],
+            "WeChatOCR",
+            "engine serialized in v2 get_node_data",
+        )
+        assert_true(
+            new_ctx.override_pipeline(
+                {
+                    "OcrEngine": {
+                        "recognition": {
+                            "type": "OCR",
+                            "param": {"engine": "Default", "only_rec": True},
+                        }
+                    }
+                }
+            ),
+            "select default engine with v2 override",
+        )
+        assert_eq(
+            new_ctx.get_node_object("OcrEngine").recognition.param.engine,
+            "Default",
+            "v2 engine round trip",
+        )
+        assert_false(
+            new_ctx.override_pipeline({"OcrEngine": {"engine": "WeChatOCR"}}),
+            "WeChatOCR rejects inherited only_rec",
+        )
+        for name, invalid_param in {
+            "UnknownOcrEngine": {"engine": "Unknown"},
+            "WeChatOnlyRec": {"engine": "WeChatOCR", "only_rec": True},
+            "WeChatModel": {"engine": "WeChatOCR", "model": "custom_model"},
+        }.items():
+            assert_false(
+                new_ctx.override_pipeline(
+                    {name: {"recognition": {"type": "OCR", "param": invalid_param}}}
+                ),
+                f"reject invalid engine configuration: {name}",
+            )
+        print("    PASS: OCR engine parsing and override")
 
     def _test_context_get_node_data(self, context: Context):
         print("  Testing context.get_node_data...")
@@ -738,6 +806,7 @@ class PipelineTestRecognition(CustomRecognition):
                     "custom_recognition": "MyCustomReco",
                     "custom_recognition_param": {"key": "value"},
                     "roi": [0, 0, 100, 100],
+                    "index": -1,
                 }
             }
         )
@@ -748,6 +817,21 @@ class PipelineTestRecognition(CustomRecognition):
         assert_eq(param.custom_recognition, "MyCustomReco", "custom_recognition")
         assert_eq(
             param.custom_recognition_param, {"key": "value"}, "custom_recognition_param"
+        )
+        assert_eq(param.index, -1, "index")
+
+        # Custom 的结果顺序由回调决定，order_by 不受支持
+        assert_false(
+            new_ctx.override_pipeline(
+                {
+                    "RecoCustomOrderBy": {
+                        "recognition": "Custom",
+                        "custom_recognition": "MyCustomReco",
+                        "order_by": "Horizontal",
+                    }
+                }
+            ),
+            "custom order_by should be rejected",
         )
 
         print("    PASS: recognition types parsing")

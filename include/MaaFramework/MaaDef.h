@@ -126,6 +126,15 @@ enum MaaGlobalOptionEnum
     /// value: size_t, eg: 4096; val_size: sizeof(size_t)
     /// default value is 4096
     MaaGlobalOption_RecoImageCacheLimit = 9,
+
+    /// Preserve recognition input PNGs. value: bool. Unset follows DebugMode.
+    MaaGlobalOption_RecoImageRaw = 10,
+    /// Generate recognition annotation images. value: bool. Unset follows SaveDraw/DebugMode and Debug-build defaults.
+    MaaGlobalOption_RecoImageDraws = 11,
+    /// Encoded recognition image byte limit per Tasker. value: size_t. Zero disables new image caching; default unlimited.
+    MaaGlobalOption_RecoImageCacheBytes = 12,
+    /// Include the effective pipeline in recognition/action notifications. value: bool; default false.
+    MaaGlobalOption_CaptureConfig = 13,
 };
 
 typedef MaaOption MaaResOption;
@@ -207,6 +216,15 @@ enum MaaResOptionEnum
     /// value: MaaInferenceExecutionProvider, eg: 0; val_size: sizeof(MaaInferenceExecutionProvider)
     /// default value is MaaInferenceExecutionProvider_Auto
     MaaResOption_InferenceExecutionProvider = 2,
+
+    /// Configure the optional WeChatOCR engine (Windows x64 and Linux x64).
+    /// value: UTF-8 JSON bytes; val_size excludes the optional terminating NUL.
+    /// Empty JSON {} enables SDK/runtime discovery. sdk_path is optional; runtime_dir and
+    /// ocr_path must be supplied together or both omitted. Explicit paths must be absolute.
+    /// Configure a local Resource before any MaaResourcePost* call; remote resources do not support it.
+    /// MaaResourceClear resets the configuration. Select engine="WeChatOCR" in OCR nodes.
+    /// Configuration options: https://github.com/MaaXYZ/WeChatOCR-SDK#readme
+    MaaResOption_WeChatOCR = 3,
 };
 
 typedef MaaOption MaaCtrlOption;
@@ -305,7 +323,7 @@ enum MaaTaskerOptionEnum
  * | RawByNetcat           | Fast       | Low           | Lossless |                                   |
  * | MinicapDirect         | Fast       | Low           | Lossy    |                                   |
  * | MinicapStream         | Very Fast  | Low           | Lossy    |                                   |
- * | EmulatorExtras        | Very Fast  | Low           | Lossless | Emulators only: MuMu 12, LDPlayer 9 |
+ * | EmulatorExtras        | Very Fast  | Low           | Lossless | Emulators only: MuMu 12, LDPlayer 9, AVD, Androws, ModAVD |
  */
 typedef uint64_t MaaAdbScreencapMethod;
 #define MaaAdbScreencapMethod_EncodeToFileAndPull 1ULL
@@ -338,7 +356,7 @@ typedef uint64_t MaaAdbScreencapMethod;
  * | AdbShell             | Slow  | High          |                                       |
  * | MinitouchAndAdbKey   | Fast  | Medium        | Key press still uses AdbShell         |
  * | Maatouch             | Fast  | Medium        |                                       |
- * | EmulatorExtras       | Fast  | Low           | Emulators only: MuMu 12               |
+ * | EmulatorExtras       | Fast  | Low           | Emulators only: MuMu 12, Androws, ModAVD       |
  */
 typedef uint64_t MaaAdbInputMethod;
 #define MaaAdbInputMethod_AdbShell 1ULL
@@ -349,6 +367,35 @@ typedef uint64_t MaaAdbInputMethod;
 #define MaaAdbInputMethod_None 0ULL
 #define MaaAdbInputMethod_All (~MaaAdbInputMethod_None)
 #define MaaAdbInputMethod_Default (MaaAdbInputMethod_All & (~MaaAdbInputMethod_EmulatorExtras))
+
+// MaaIOSScreencapMethod:
+/**
+ * @brief iOS screencap method flags.
+ *
+ * Use bitwise OR to select the permitted backends. Video frames are preferred
+ * when Stream is enabled; ScreenshotService provides a lossless RPC fallback.
+ * Stream alone has no screenshot fallback. ScreenshotService alone starts no
+ * video session or background video decoder.
+ *
+ * Default: All methods. Reported availability describes supported backends,
+ * not a guarantee that every connected device/DDI exposes both services.
+ */
+typedef uint64_t MaaIOSScreencapMethod;
+#define MaaIOSScreencapMethod_None 0ULL
+#define MaaIOSScreencapMethod_Stream 1ULL
+#define MaaIOSScreencapMethod_ScreenshotService (1ULL << 1)
+#define MaaIOSScreencapMethod_All (~MaaIOSScreencapMethod_None)
+#define MaaIOSScreencapMethod_Default MaaIOSScreencapMethod_All
+
+// Connection selection is independent of the wireless credentials.
+typedef int32_t MaaIOSConnectionMethod;
+
+enum MaaIOSConnectionMethodEnum
+{
+    MaaIOSConnectionMethod_Auto = 0,
+    MaaIOSConnectionMethod_USB = 1,
+    MaaIOSConnectionMethod_WiFi = 2,
+};
 
 // MaaWin32ScreencapMethod:
 /**
@@ -688,6 +735,10 @@ typedef void(MAA_CALL* MaaNotificationCallback)(const char* message, const char*
 /// - MaaContext* for MaaContext event
 typedef void(MAA_CALL* MaaEventCallback)(void* handle, const char* message, const char* details_json, void* trans_arg);
 
+/// out_box is the final (single) result; out_detail carries arbitrary callback data.
+/// To return multiple results, write a JSON object into out_detail with the reserved keys
+/// "$all" / "$filtered", each an array of {"box": [x, y, w, h], "detail": any}; the framework
+/// keeps the callback's own order and selects the final box with the node's "index".
 typedef MaaBool(MAA_CALL* MaaCustomRecognitionCallback)(
     MaaContext* context,
     MaaTaskId task_id,

@@ -1,7 +1,5 @@
 #include "TaskBase.h"
 
-#include <thread>
-
 #include "Component/ActionHelper.h"
 #include "Component/Actuator.h"
 #include "Component/Recognizer.h"
@@ -10,7 +8,9 @@
 #include "MaaFramework/MaaMsg.h"
 #include "MaaUtils/JsonExt.hpp"
 #include "MaaUtils/Logger.h"
+#include "Resource/PipelineDumper.h"
 #include "Resource/ResourceMgr.h"
+#include "Task/InterruptibleSleep.hpp"
 
 MAA_TASK_NS_BEGIN
 
@@ -20,6 +20,15 @@ TaskBase::TaskBase(std::string entry, Tasker* tasker, std::shared_ptr<Context> c
     , cur_node_(entry_)
     , context_(context ? std::move(context) : Context::create(task_id_, tasker))
 {
+    context_->begin_task(task_id_);
+}
+
+std::string TaskBase::termination_reason(bool succeeded) const
+{
+    if (context_ && context_->need_to_stop()) {
+        return "cancelled";
+    }
+    return succeeded ? "completed" : failure_reason_;
 }
 
 bool TaskBase::override_pipeline(const json::value& pipeline_override)
@@ -56,7 +65,8 @@ RecoResult TaskBase::run_recognition(
     const cv::Mat& image,
     const PipelineData& data,
     std::optional<std::string> anchor_name,
-    std::shared_ptr<MAA_VISION_NS::OCRCache> ocr_cache)
+    std::shared_ptr<MAA_VISION_NS::OCRCache> ocr_cache,
+    std::shared_ptr<MAA_VISION_NS::NeuralNetworkCache> nn_cache)
 {
     LogFunc << VAR(cur_node_) << VAR(data.name);
 
@@ -65,7 +75,7 @@ RecoResult TaskBase::run_recognition(
         return { };
     }
 
-    Recognizer recognizer(tasker_, *context_, image, std::move(ocr_cache));
+    Recognizer recognizer(tasker_, *context_, image, std::move(ocr_cache), std::move(nn_cache));
 
     json::value cb_detail {
         { "task_id", task_id() },
@@ -77,6 +87,11 @@ RecoResult TaskBase::run_recognition(
         cb_detail["anchor"] = *anchor_name;
     }
 
+    if (MAA_GLOBAL_NS::OptionMgr::get_instance().capture_config()) {
+        cb_detail["pipeline"] = MAA_RES_NS::PipelineDumper::dump(data);
+    }
+    cb_detail["parent"] = context_->operation();
+    Context::OperationScope operation(*context_, "recognition", recognizer.get_id());
     notify(MaaMsg_Node_Recognition_Starting, cb_detail);
 
     RecoResult result = recognizer.recognize(data.reco_type, data.reco_param, data.name);
@@ -87,7 +102,11 @@ RecoResult TaskBase::run_recognition(
     }
 
     cb_detail["reco_details"] = result;
-    notify(result.box ? MaaMsg_Node_Recognition_Succeeded : MaaMsg_Node_Recognition_Failed, cb_detail);
+    const bool cancelled = context_->need_to_stop();
+    cb_detail["reason"] = cancelled ? "cancelled" : (result.box ? "matched" : "unknown");
+    notify(
+        cancelled ? MaaMsg_Node_Recognition_Cancelled : (result.box ? MaaMsg_Node_Recognition_Succeeded : MaaMsg_Node_Recognition_Failed),
+        cb_detail);
 
     return result;
 }
@@ -119,31 +138,42 @@ ActionResult TaskBase::run_action(const RecoResult& reco, const PipelineData& da
         { "name", reco.name },
         { "focus", data.focus },
     };
-    notify(MaaMsg_Node_Action_Starting, cb_detail);
-
-    ActionResult result;
-
-    for (uint i = 0; i < data.repeat; ++i) {
-        if (i > 0) {
-            wait_freezes(data.repeat_wait_freezes, *reco.box, data.name, "repeat", data.focus);
-            sleep(data.repeat_delay);
-        }
-
-        if (context_->need_to_stop()) {
-            return { };
-        }
-
-        result = actuator.run(*reco.box, reco.reco_id, data, entry_);
-        LogInfo << "action" << VAR(i) << VAR(data.repeat) << VAR(result);
-
-        if (context_->need_to_stop()) {
-            break;
-        }
+    if (MAA_GLOBAL_NS::OptionMgr::get_instance().capture_config()) {
+        cb_detail["pipeline"] = MAA_RES_NS::PipelineDumper::dump(data);
     }
+    cb_detail["parent"] = context_->operation();
+    cb_detail["reco_id"] = reco.reco_id;
+    ActionResult result;
+    {
+        Context::OperationScope operation(*context_, "action", actuator.get_id());
+        notify(MaaMsg_Node_Action_Starting, cb_detail);
 
-    cb_detail["action_details"] = result;
-    notify(result.success ? MaaMsg_Node_Action_Succeeded : MaaMsg_Node_Action_Failed, cb_detail);
+        for (uint i = 0; i < data.repeat; ++i) {
+            if (i > 0) {
+                wait_freezes(data.repeat_wait_freezes, *reco.box, data.name, "repeat", data.focus);
+                sleep(data.repeat_delay);
+            }
 
+            if (context_->need_to_stop()) {
+                result = { };
+                break;
+            }
+
+            result = actuator.run(*reco.box, reco.reco_id, data, entry_);
+            LogInfo << "action" << VAR(i) << VAR(data.repeat) << VAR(result);
+
+            if (context_->need_to_stop()) {
+                break;
+            }
+        }
+
+        cb_detail["action_details"] = result;
+        const bool cancelled = context_->need_to_stop();
+        cb_detail["reason"] = cancelled ? "cancelled" : (result.success ? "completed" : "action_failed");
+        notify(
+            cancelled ? MaaMsg_Node_Action_Cancelled : (result.success ? MaaMsg_Node_Action_Succeeded : MaaMsg_Node_Action_Failed),
+            cb_detail);
+    }
     if (!context_->need_to_stop()) {
         wait_freezes(data.post_wait_freezes, *reco.box, data.name, "post", data.focus);
         sleep(data.post_delay);
@@ -180,23 +210,7 @@ void TaskBase::set_node_detail(MaaNodeId node_id, NodeDetail detail)
         cache.set_latest_node(detail.name, node_id);
     }
 
-    // value_or 的默认值用于 run 到一半调用方手动 clear cache 了的情况
-    TaskDetail task_detail =
-        cache.get_task_detail(task_id_).value_or(TaskDetail { .task_id = task_id_, .entry = entry_, .status = MaaStatus_Running });
-    task_detail.node_ids.emplace_back(node_id);
-
-    set_task_detail(task_detail);
-}
-
-void TaskBase::set_task_detail(TaskDetail detail)
-{
-    if (!tasker_) {
-        LogError << "tasker is null";
-        return;
-    }
-
-    auto& cache = tasker_->runtime_cache();
-    cache.set_task_detail(task_id_, detail);
+    cache.append_task_node(task_id_, entry_, node_id);
 }
 
 void TaskBase::wait_freezes(
@@ -214,7 +228,13 @@ void TaskBase::sleep(std::chrono::milliseconds ms) const
 {
     LogDebug << ms;
 
-    std::this_thread::sleep_for(ms);
+    // helper 内部只能静默提前返回，这里补一条可追溯的日志
+    if (context_ && context_->need_to_stop()) {
+        LogWarn << "need_to_stop, skip sleep" << VAR(ms);
+        return;
+    }
+
+    interruptible_sleep::sleep_for(ms, context_.get());
 }
 
 bool TaskBase::debug_mode() const
@@ -228,7 +248,7 @@ void TaskBase::notify(std::string_view msg, const json::value detail)
         return;
     }
 
-    tasker_->context_notify(context_.get(), msg, detail);
+    context_->notify(msg, detail);
 }
 
 MAA_TASK_NS_END

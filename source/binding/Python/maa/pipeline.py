@@ -102,6 +102,7 @@ class JOCR:
     order_by: str = "Horizontal"
     index: int = 0
     only_rec: bool = False
+    engine: str = "Default"
     model: str = ""
     color_filter: str = ""
 
@@ -135,6 +136,7 @@ class JCustomRecognition:
     roi: JTarget = (0, 0, 0, 0)
     roi_offset: JRect = (0, 0, 0, 0)
     custom_recognition_param: Any = None
+    index: int = 0
 
 
 @dataclass

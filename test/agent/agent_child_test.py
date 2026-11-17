@@ -22,7 +22,7 @@ if sys.stdout.encoding != "utf-8":
 if sys.stderr.encoding != "utf-8":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-if len(sys.argv) < 4:
+if len(sys.argv) < 5:
     print("Call agent_main_test.py instead of this file.")
     sys.exit(1)
 
@@ -54,6 +54,7 @@ from agent_test_utils import (
     record_sink_event,
     signal_server_ready,
 )
+from remote_contract import REMOTE_CONTRACT_CASES
 
 
 analyzed: bool = False
@@ -194,6 +195,12 @@ class MyRecognition(CustomRecognition):
         # ============================================================
         resource = tasker.resource
 
+        load_detail = resource.get_load_detail(int(sys.argv[-2]))
+        assert load_detail is not None
+        assert load_detail["errors"] == []
+        assert load_detail["res_id"] == int(sys.argv[-2])
+        assert resource.get_load_detail(0) is None
+
         # 测试 loaded (valid) 属性
         print(f"  resource.loaded: {resource.loaded}")
 
@@ -235,7 +242,14 @@ class MyRecognition(CustomRecognition):
         analyzed = True
 
         return CustomRecognition.AnalyzeResult(
-            box=(11, 4, 5, 14), detail="Hello World!"
+            box=(11, 4, 5, 14),
+            detail={
+                "message": "Hello World!",
+                "$all": [
+                    {"box": [11, 4, 5, 14], "detail": {"message": "first"}},
+                    {"box": [21, 24, 25, 34], "detail": {"message": "second"}},
+                ],
+            },
         )
 
 
@@ -382,13 +396,34 @@ class MyAction(CustomAction):
                     )
 
         # 测试 clear_cache
-        tasker.clear_cache()
+        assert tasker.clear_cache()
+        retained = tasker.get_task_detail(argv.task_detail.task_id)
+        assert retained is not None and retained.status.running
+        assert retained.entry == argv.task_detail.entry
+        assert not retained.node_id_list
+        # Cloned contexts still need the parent's task detail for custom callbacks.
+        nested = context.clone().run_recognition(
+            "CacheAfterClear",
+            controller.cached_image,
+            {"CacheAfterClear": {"recognition": "Custom", "custom_recognition": "FastRec"}},
+        )
+        assert nested is not None and nested.hit
         print("  tasker.clear_cache() called")
 
         global runned
         runned = True
 
         return CustomAction.RunResult(success=True)
+
+
+@AgentServer.custom_action("RemoteContract")
+class RemoteContract(CustomAction):
+    def run(self, context, argv):
+        for case in REMOTE_CONTRACT_CASES:
+            print(f"Remote API contract: {case.__name__}", flush=True)
+            case(context)
+            record_sink_event(f"remote_contract:{case.__name__}")
+        return True
 
 
 @AgentServer.custom_recognition("SlowRec")
@@ -402,6 +437,24 @@ class SlowRecognition(CustomRecognition):
         node_data = context.get_node_data("Entry")
         record_sink_event(f"slow_rec_node_data:{'none' if node_data is None else 'value'}")
         return CustomRecognition.AnalyzeResult(box=(9, 9, 9, 9), detail="slow")
+
+
+@AgentServer.custom_recognition("MultiRec")
+class MultiRecognition(CustomRecognition):
+    def analyze(
+        self,
+        context: Context,
+        argv: CustomRecognition.AnalyzeArg,
+    ) -> CustomRecognition.AnalyzeResult:
+        return CustomRecognition.AnalyzeResult(
+            box=(11, 4, 5, 14),
+            detail={
+                "$all": [
+                    {"box": [11, 4, 5, 14], "detail": "first"},
+                    {"box": [21, 22, 23, 24], "detail": "second"},
+                ]
+            },
+        )
 
 
 @AgentServer.custom_recognition("FastRec")

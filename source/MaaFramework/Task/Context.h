@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <meojson/json.hpp>
 
@@ -64,11 +65,32 @@ public: // from MaaContextAPI
     virtual std::optional<std::string> get_anchor(const std::string& anchor_name) const override;
 
 public:
+    class OperationScope
+    {
+    public:
+        OperationScope(Context& context, std::string_view kind, MaaId id);
+        ~OperationScope();
+        OperationScope(const OperationScope&) = delete;
+        OperationScope& operator=(const OperationScope&) = delete;
+
+    private:
+        Context& context_;
+        json::value previous_;
+    };
+
+    void begin_task(MaaTaskId id);
+
+    MaaTaskId execution_task_id() const { return execution_task_id_; }
+
+    const json::value& operation() const;
+    void notify(std::string_view message, json::value details);
+
     std::optional<PipelineData> get_pipeline_data(const std::string& node_name) const;
     std::optional<PipelineData> get_pipeline_data(const MAA_RES_NS::NodeAttr& node_attr) const;
     std::vector<cv::Mat> get_images(const std::vector<std::string>& names);
 
-    bool& need_to_stop();
+    // post_stop（宿主线程）与 StopTask 动作（worker 线程）都会写，其余线程一直在读，必须原子
+    std::atomic_bool& need_to_stop();
     bool check_hit_count(const PipelineData& data);
     void increment_hit_count(const std::string& node_name);
 
@@ -76,6 +98,12 @@ private:
     bool override_pipeline_once(const json::object& pipeline_override, const MAA_RES_NS::DefaultPipelineMgr& default_mgr);
     bool check_pipeline() const;
 
+    inline static std::atomic<MaaId> next_context_id_ = 0;
+    const MaaId context_id_ = ++next_context_id_;
+    MaaTaskId execution_task_id_ = 0;
+    MaaTaskId parent_task_id_ = 0;
+    json::value parent_operation_;
+    json::value operation_;
     MaaTaskId task_id_ = 0;
     Tasker* tasker_ = nullptr;
 
@@ -85,7 +113,7 @@ private:
 
     // task level
     std::shared_ptr<TaskState> task_state_ = nullptr;
-    std::shared_ptr<bool> need_to_stop_ = nullptr;
+    std::shared_ptr<std::atomic_bool> need_to_stop_ = nullptr;
 
 private:
     mutable std::vector<std::shared_ptr<Context>> clone_holder_;

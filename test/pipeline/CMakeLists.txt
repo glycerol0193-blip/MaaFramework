@@ -9,6 +9,20 @@ add_executable(PipelineTesting ${pipeline_testing_src})
 
 target_link_libraries(PipelineTesting MaaFramework)
 
+# Exercise the private framework classes and real inference sessions without exporting
+# internal APIs from MaaFramework just for tests.
+target_sources(PipelineTesting PRIVATE
+    ../../source/MaaFramework/Resource/FastDeployOCRSession.cpp
+    ../../source/MaaFramework/Resource/InferenceResMgr.cpp
+    ../../source/MaaFramework/Resource/OrtSession.cpp
+    ../../source/MaaFramework/Tasker/RuntimeCache.cpp
+    ../../source/MaaFramework/Vision/NeuralNetworkClassifier.cpp
+    ../../source/MaaFramework/Vision/NeuralNetworkDetector.cpp
+    ../../source/MaaFramework/Vision/VisionBase.cpp
+    ../../source/MaaFramework/Global/OptionMgr.cpp)
+target_include_directories(PipelineTesting PRIVATE ../../source/MaaFramework ${MAA_PRIVATE_INC})
+target_link_libraries(PipelineTesting MaaUtils ${OpenCV_LIBS} fastdeploy_ppocr ONNXRuntime::ONNXRuntime Boost::regex HeaderOnlyLibraries)
+
 # BatchOcrRepro 用例的 OCR 模型构建时从 TestingDataSet 子模块复制（不入库，见 .gitignore）
 set(batch_ocr_repro_model_dir ${CMAKE_CURRENT_SOURCE_DIR}/resources/BatchOcrRepro/resource/model/ocr)
 add_custom_command(
@@ -24,7 +38,9 @@ add_dependencies(PipelineTesting MaaFramework PipelineSmokingResource BatchOcrRe
 set_target_properties(PipelineTesting PROPERTIES FOLDER Testing)
 
 install(TARGETS PipelineTesting RUNTIME DESTINATION bin)
+install(DIRECTORY resource/NeuralNetworkCache DESTINATION test)
 install(DIRECTORY resources/BatchOcrRepro DESTINATION test)
+install(DIRECTORY resources/PostStopInterrupt DESTINATION test)
 
 if(WIN32)
     install(FILES $<TARGET_PDB_FILE:PipelineTesting> DESTINATION symbol OPTIONAL)

@@ -6,6 +6,15 @@ import time
 from typing import Optional
 import uuid
 
+from maa.custom_action import CustomAction
+from maa.pipeline import JCustomRecognition, JRecognitionType
+from remote_contract import REMOTE_CONTRACT_CASES
+
+
+class LocalAction(CustomAction):
+    def run(self, context, argv):
+        return True
+
 
 SERVER_READY_FILE_ENV = "MAAFW_AGENT_SERVER_READY_FILE"
 SINK_REPORT_FILE_ENV = "MAAFW_AGENT_SINK_REPORT_FILE"
@@ -105,7 +114,7 @@ def connect_agent_server(
 
 
 def assert_sink_events(report_file: Path) -> None:
-    expected = {"resource", "controller", "tasker"}
+    expected = {"resource", "controller", "tasker", "context"}
     actual = (
         set(report_file.read_text(encoding="utf-8").splitlines())
         if report_file.exists()
@@ -130,6 +139,72 @@ def run_custom_recognition(tasker, reco_name: str):
         return None
     box = node.recognition.box
     return (box.x, box.y, box.w, box.h)
+
+
+MULTI_REC_BOXES = ((11, 4, 5, 14), (21, 22, 23, 24))
+
+
+def assert_multi_recognition(tasker) -> None:
+    # 回调通过 "$all" 返回多个结果，框架保持回调顺序，并按节点 index 选取最终 box
+    for index, expected_box in ((-1, MULTI_REC_BOXES[1]), (1, MULTI_REC_BOXES[1]), (0, MULTI_REC_BOXES[0])):
+        pipeline_override = {
+            "Entry": {"next": "StaleProbe", "timeout": 0},
+            "StaleProbe": {
+                "recognition": "Custom",
+                "custom_recognition": "MultiRec",
+                "index": index,
+            },
+        }
+        job = tasker.post_task("Entry", pipeline_override).wait()
+        assert job.succeeded, "clearing history in an Agent action must preserve the job's status"
+        detail = job.get()
+        assert detail, f"pipeline failed for index {index}"
+        node = next((n for n in detail.nodes if n.name == "StaleProbe"), None)
+        assert node and node.recognition, f"missing recognition detail for index {index}"
+        reco = node.recognition
+        assert reco.hit, f"should hit for index {index}"
+        assert [int(v) for v in reco.box] == list(expected_box), (
+            f"wrong best box for index {index}: {reco.box}"
+        )
+        assert len(reco.all_results) == 2, f"all results for index {index}"
+        assert len(reco.filtered_results) == 2, f"filtered results for index {index}"
+        assert [
+            [int(v) for v in res.box] for res in reco.all_results
+        ] == [list(box) for box in MULTI_REC_BOXES], f"wrong order for index {index}"
+
+    # 越界 index 视为无结果
+    pipeline_override = {
+        "Entry": {"next": "StaleProbe", "timeout": 0},
+        "StaleProbe": {
+            "recognition": "Custom",
+            "custom_recognition": "MultiRec",
+            "index": 2,
+        },
+    }
+    detail = tasker.post_task("Entry", pipeline_override).wait().get()
+    assert detail, "pipeline failed for out-of-range index"
+    assert not any(n.name == "StaleProbe" for n in detail.nodes), (
+        "out-of-range index should not hit"
+    )
+
+    # post_task 未命中时会一直重试到超时，识别详情不会落库；用 post_recognition
+    # 验证框架确实记录了这次未命中，且全部结果仍在，只是没有选中的结果
+    reco_detail = tasker.post_recognition(
+        JRecognitionType.Custom,
+        JCustomRecognition(custom_recognition="MultiRec", index=2),
+        tasker.controller.cached_image,
+    ).wait().get()
+    assert reco_detail and reco_detail.nodes, (
+        "out-of-range index should still record the recognition"
+    )
+    reco = reco_detail.nodes[0].recognition
+    assert reco, "out-of-range index should still record the recognition"
+    assert not reco.hit, "out-of-range index should not hit"
+    assert len(reco.all_results) == 2, f"all results should be kept: {reco.all_results}"
+    assert len(reco.filtered_results) == 2, (
+        f"filtered results should be kept: {reco.filtered_results}"
+    )
+    assert reco.best_result is None, f"no result should be selected: {reco.best_result}"
 
 
 def assert_stale_response_dropped(agent, tasker, report_file: Path) -> None:
@@ -177,6 +252,7 @@ def run_connected_agent_test(
     try:
         assert agent.connected
         assert agent.alive
+        assert resource.register_custom_action("AgentContractLocalAction", LocalAction())
 
         reco_list = agent.custom_recognition_list
         action_list = agent.custom_action_list
@@ -227,10 +303,39 @@ def run_connected_agent_test(
                     )
                     assert action_detail.success, "custom action should succeed"
 
+        # MyRec 通过 "$all" 返回多个结果，index 为 -1 时最终 box 是第二个结果
+        assert "MultiRec" in reco_list
+        assert_multi_recognition(tasker)
+
+        contract_job = tasker.post_task(
+            "AgentContractEntry",
+            {
+                "AgentContractEntry": {
+                    "action": "Custom",
+                    "custom_action": "RemoteContract",
+                    "pre_delay": 0,
+                    "post_delay": 0,
+                }
+            },
+        ).wait()
+        assert contract_job.succeeded, "remote API contract task should succeed"
+        # Callback exceptions can be swallowed by ctypes; every case must confirm completion.
+        records = set(sink_report_file.read_text(encoding="utf-8").splitlines())
+        expected_contracts = {f"remote_contract:{case.__name__}" for case in REMOTE_CONTRACT_CASES}
+        assert expected_contracts <= records, f"missing remote API contracts: {expected_contracts - records}"
+
         assert_stale_response_dropped(agent, tasker, sink_report_file)
         assert_nested_response_kept(agent, tasker, sink_report_file)
 
         assert agent.disconnect()
+        assert not agent.connected
+        assert not agent.alive
+        assert "MyRec" not in resource.custom_recognition_list
+        assert "MyAct" not in resource.custom_action_list
+        assert "RemoteContract" not in resource.custom_action_list
+        assert agent.custom_recognition_list == []
+        assert agent.custom_action_list == []
+        assert "AgentContractLocalAction" in resource.custom_action_list
         child_process.wait(timeout=PROCESS_TIMEOUT_SECONDS)
         assert child_process.returncode == 0
         assert_sink_events(sink_report_file)
@@ -247,3 +352,5 @@ def run_connected_agent_test(
                 stop_agent_server(child_process)
             finally:
                 sink_report_file.unlink(missing_ok=True)
+                if "AgentContractLocalAction" in resource.custom_action_list:
+                    assert resource.unregister_custom_action("AgentContractLocalAction")

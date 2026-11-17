@@ -7,12 +7,16 @@ set_target_properties(LibraryHolder PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(LibraryHolder
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${MAA_PRIVATE_INC} ${MAA_PUBLIC_INC})
 
-target_link_libraries(LibraryHolder MaaUtils Boost::system ${OpenCV_LIBS})
+target_link_libraries(LibraryHolder MaaUtils Boost::system ${OpenCV_LIBS} ${CMAKE_DL_LIBS})
 
 add_dependencies(LibraryHolder MaaUtils)
 
 if(WITH_ADB_CONTROLLER)
     add_dependencies(LibraryHolder MaaAdbControlUnit)
+endif()
+
+if(WITH_IOS_CONTROLLER)
+    add_dependencies(LibraryHolder MaaIOSControlUnit)
 endif()
 
 if(WITH_WIN32_CONTROLLER)

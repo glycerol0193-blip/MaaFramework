@@ -35,8 +35,9 @@ public:
         std::string name;
         std::filesystem::path process_path;
         std::filesystem::path adb_path;
+        std::vector<std::string> common_serials;
 
-        MEO_TOJSON(name, process_path, adb_path);
+        MEO_TOJSON(name, process_path, adb_path, common_serials);
     };
 
 public:
@@ -54,6 +55,8 @@ protected:
 
     virtual std::vector<AdbDevice> find_by_emulator_tool(const Emulator&) const { return { }; }
 
+    virtual std::vector<std::string> find_serials_by_emulator_config(const Emulator&) const { return { }; }
+
     // Extra emulator discovery hook for platform-specific fallbacks that cannot rely on process enumeration,
     // e.g. emulators running as elevated processes whose exe path is unreachable via OpenProcess.
     // Subclasses may override to return additional Emulator entries. Results are de-duplicated by adb_path
@@ -63,6 +66,13 @@ protected:
 protected:
     std::vector<std::string> find_serials_by_adb_command(const std::filesystem::path& adb_path) const;
     std::optional<AdbDevice> try_device(const std::filesystem::path& adb_path, const std::string& serial, const Emulator& emulator) const;
+
+    std::vector<AdbDevice> find_by_candidate_serials(
+        const std::filesystem::path& adb_path,
+        const std::unordered_set<std::string>& exclude_serials,
+        const Emulator& emulator) const;
+
+    static std::vector<std::string> filter_reachable_serials(const std::vector<std::string>& serials);
 
     std::vector<Emulator> find_emulators() const;
     std::filesystem::path get_emulator_adb_path(const EmulatorConstantData& emulator, os_pid pid) const;

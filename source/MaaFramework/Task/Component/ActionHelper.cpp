@@ -5,6 +5,7 @@
 #include "MaaUtils/Logger.h"
 #include "Recognizer.h"
 #include "Task/Context.h"
+#include "Task/InterruptibleSleep.hpp"
 #include "Tasker/Tasker.h"
 #include "Vision/TemplateComparator.h"
 #include "Vision/VisionUtils.hpp"
@@ -21,6 +22,12 @@ bool ActionHelper::wait_freezes(
     const cv::Rect& ref_box,
     const WaitFreezesNotifyContext& noti_ctx)
 {
+    // post_stop 是立即停止语义，本函数最长可阻塞 param.timeout（默认 20s），必须响应停止标志
+    if (context_ && context_->need_to_stop()) {
+        LogWarn << "need_to_stop before wait_freezes" << VAR(noti_ctx.name) << VAR(noti_ctx.phase);
+        return false;
+    }
+
     if (param.time <= std::chrono::milliseconds(0)) {
         return true;
     }
@@ -49,7 +56,7 @@ bool ActionHelper::wait_freezes(
     const MaaWfId wf_id = generate_wf_id();
 
     json::value cb_detail {
-        { "task_id", context_ ? context_->task_id() : MaaInvalidId },
+        { "task_id", context_ ? context_->execution_task_id() : MaaInvalidId },
         { "wf_id", wf_id },
         { "name", noti_ctx.name },
         { "phase", noti_ctx.phase },
@@ -64,16 +71,19 @@ bool ActionHelper::wait_freezes(
           } },
         { "focus", noti_ctx.focus },
     };
+    cb_detail["parent"] = context_->operation();
+    Context::OperationScope operation(*context_, "wait_freezes", wf_id);
     notify(MaaMsg_Node_WaitFreezes_Starting, cb_detail);
 
     std::vector<MaaRecoId> reco_ids;
 
     auto finish = [&](bool success) {
+        const bool cancelled = context_ && context_->need_to_stop();
+        success = success && !cancelled;
         auto elapsed_ms = duration_since(start_clock).count();
 
         cb_detail["reco_ids"] = json::array(reco_ids);
         cb_detail["elapsed"] = elapsed_ms;
-        notify(success ? MaaMsg_Node_WaitFreezes_Succeeded : MaaMsg_Node_WaitFreezes_Failed, cb_detail);
 
         if (auto* t = tasker()) {
             t->runtime_cache().set_wf_detail(
@@ -88,6 +98,11 @@ bool ActionHelper::wait_freezes(
                     .roi = roi,
                 });
         }
+
+        cb_detail["reason"] = cancelled ? "cancelled" : (success ? "completed" : "unknown");
+        notify(
+            cancelled ? MaaMsg_Node_WaitFreezes_Cancelled : (success ? MaaMsg_Node_WaitFreezes_Succeeded : MaaMsg_Node_WaitFreezes_Failed),
+            cb_detail);
 
         return success;
     };
@@ -109,7 +124,12 @@ bool ActionHelper::wait_freezes(
 
     while (true) {
         LogDebug << "sleep_until" << VAR(rate_limit);
-        std::this_thread::sleep_until(screencap_clock + rate_limit);
+        interruptible_sleep::sleep_until(screencap_clock + rate_limit, context_);
+
+        if (context_ && context_->need_to_stop()) {
+            LogWarn << "need_to_stop, abort wait freezes" << VAR(noti_ctx.name) << VAR(noti_ctx.phase) << VAR(duration_since(start_clock));
+            return finish(false);
+        }
 
         if (param.timeout >= std::chrono::milliseconds(0) && duration_since(start_clock) > param.timeout) {
             LogWarn << "Wait freezes timeout" << VAR(duration_since(start_clock)) << VAR(param.timeout);
@@ -178,6 +198,12 @@ bool ActionHelper::wait_freezes(
         if (duration_since(pre_image_clock) > param.time) {
             break;
         }
+    }
+
+    // 跳出循环到返回成功之间仍可能收到 post_stop，此时不应把结果报成成功
+    if (context_ && context_->need_to_stop()) {
+        LogWarn << "need_to_stop, abort wait freezes" << VAR(noti_ctx.name) << VAR(noti_ctx.phase) << VAR(duration_since(start_clock));
+        return finish(false);
     }
 
     return finish(true);
@@ -302,7 +328,7 @@ void ActionHelper::notify(std::string_view msg, const json::value& detail)
     if (!t || !context_) {
         return;
     }
-    t->context_notify(context_, msg, detail);
+    context_->notify(msg, detail);
 }
 
 MAA_CTRL_NS::ControllerAgent* ActionHelper::controller()
